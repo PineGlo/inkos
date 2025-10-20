@@ -4,8 +4,13 @@ use crate::agents::config::{self, AiSettingsUpdate};
 use crate::agents::{AiChatInput, AiChatMessage, AiChatResponse, AiOrchestrator};
 use crate::db::DbPool;
 use crate::logging::log_event;
+use crate::workers::{self, JobRunResult};
+use r2d2_sqlite::rusqlite::{Connection as SqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{async_runtime::spawn_blocking, State};
+use time::macros::format_description;
+use time::Date;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -122,6 +127,208 @@ pub fn list_notes(
         results.push(r.map_err(|e| e.to_string())?);
     }
     Ok(results)
+}
+
+#[derive(Serialize)]
+pub struct LogbookEntry {
+    pub id: String,
+    pub entry_date: String,
+    pub summary: String,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub fn list_logbook_entries(
+    state: State<ApiState>,
+    limit: Option<usize>,
+) -> Result<Vec<LogbookEntry>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    ensure_today_digest(&conn)?;
+
+    let mut entries = Vec::new();
+    if let Some(limit) = limit {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, entry_date, summary, created_at FROM logbook_entries ORDER BY entry_date DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok(LogbookEntry {
+                    id: row.get(0)?,
+                    entry_date: row.get(1)?,
+                    summary: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            entries.push(row.map_err(|e| e.to_string())?);
+        }
+        return Ok(entries);
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT id, entry_date, summary, created_at FROM logbook_entries ORDER BY entry_date DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(LogbookEntry {
+                id: row.get(0)?,
+                entry_date: row.get(1)?,
+                summary: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        entries.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(entries)
+}
+
+#[derive(Serialize)]
+pub struct TimelineEvent {
+    pub id: String,
+    pub entry_date: String,
+    pub event_time: i64,
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub fn list_timeline_events(
+    state: State<ApiState>,
+    date: Option<String>,
+) -> Result<Vec<TimelineEvent>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    ensure_today_digest(&conn)?;
+
+    let resolved_date = if let Some(value) = date {
+        Date::parse(&value, &format_description!("[year]-[month]-[day]"))
+            .map_err(|e| e.to_string())?
+    } else {
+        OffsetDateTime::now_utc().date()
+    };
+    let date_key = resolved_date.to_string();
+
+    let mut stmt = conn
+        .prepare("SELECT id, entry_date, event_time, kind, title, detail, created_at FROM timeline_events WHERE entry_date = ?1 ORDER BY event_time ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([date_key.as_str()], |row| {
+            let detail: Option<String> = row.get(5)?;
+            Ok(TimelineEvent {
+                id: row.get(0)?,
+                entry_date: row.get(1)?,
+                event_time: row.get(2)?,
+                kind: row.get(3)?,
+                title: row.get(4)?,
+                detail,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(events)
+}
+
+#[derive(Serialize)]
+pub struct AiRuntimeEvent {
+    pub id: String,
+    pub ts: i64,
+    pub level: String,
+    pub code: Option<String>,
+    pub message: String,
+    pub explain: Option<String>,
+    pub data: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+pub fn list_ai_events(
+    state: State<ApiState>,
+    limit: Option<usize>,
+) -> Result<Vec<AiRuntimeEvent>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut events = Vec::new();
+    if let Some(limit) = limit {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, ts, level, code, message, explain, data FROM event_log WHERE module = 'ai.runtime' ORDER BY ts DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([limit as i64], map_ai_event)
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            events.push(row.map_err(|e| e.to_string())?);
+        }
+        return Ok(events);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, ts, level, code, message, explain, data FROM event_log WHERE module = 'ai.runtime' ORDER BY ts DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], map_ai_event)
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        events.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(events)
+}
+
+fn map_ai_event(row: &r2d2_sqlite::rusqlite::Row) -> r2d2_sqlite::rusqlite::Result<AiRuntimeEvent> {
+    let data_str: Option<String> = row.get(6)?;
+    let data = data_str.and_then(|raw| serde_json::from_str(&raw).ok());
+    Ok(AiRuntimeEvent {
+        id: row.get(0)?,
+        ts: row.get(1)?,
+        level: row.get(2)?,
+        code: row.get(3)?,
+        message: row.get(4)?,
+        explain: row.get(5)?,
+        data,
+    })
+}
+
+#[tauri::command]
+pub fn run_daily_digest(
+    state: State<ApiState>,
+    date: Option<String>,
+) -> Result<JobRunResult, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let payload = if let Some(value) = date {
+        json!({ "date": value })
+    } else {
+        json!({})
+    };
+    workers::enqueue_job(&conn, "workspace.daily_digest", payload).map_err(|e| e.to_string())
+}
+
+fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
+    let today = OffsetDateTime::now_utc().date().to_string();
+    let mut stmt = conn
+        .prepare("SELECT id FROM logbook_entries WHERE entry_date = ?1 LIMIT 1")
+        .map_err(|e| e.to_string())?;
+    let existing: Option<String> = stmt
+        .query_row([today.as_str()], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if existing.is_none() {
+        let _ = workers::enqueue_job(conn, "workspace.daily_digest", json!({}))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

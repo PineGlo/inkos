@@ -1,10 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import Settings from './Settings'
-import { ping, createNote, listNotes } from '../lib/api'
+import Timeline from './Timeline'
+import Palette, { type PaletteCommand } from '../components/Palette'
+import Console from '../components/Console'
+import { ping, createNote, listNotes, runDailyDigest } from '../lib/api'
 
 type Note = { id: string; title: string; created_at: number }
 
-function NotesPanel() {
+function NotesPanel({ onNotify }: { onNotify?: (message: string, kind?: 'info' | 'error') => void }) {
   const [status, setStatus] = useState('Checking core...')
   const [title, setTitle] = useState('Hello InkOS (v2)')
   const [notes, setNotes] = useState<Note[]>([])
@@ -29,7 +32,7 @@ function NotesPanel() {
       const { id } = await createNote({ title: title.trim(), body: 'Created from UI v2' })
       setNotes(await listNotes())
       setTitle('')
-      alert('Note created: ' + id)
+      onNotify?.(`Note created: ${id}`, 'info')
     } finally {
       setBusy(false)
     }
@@ -93,10 +96,99 @@ function NotesPanel() {
   )
 }
 
-type TabKey = 'notes' | 'settings'
+type TabKey = 'notes' | 'timeline' | 'settings'
+
+type Notice = { text: string; kind: 'info' | 'error' }
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>('notes')
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [consoleOpen, setConsoleOpen] = useState(false)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [timelineRefreshKey, setTimelineRefreshKey] = useState(0)
+
+  const notify = useCallback((message: string, kind: 'info' | 'error' = 'info') => {
+    setNotice({ text: message, kind })
+  }, [])
+
+  const dismissNotice = useCallback(() => setNotice(null), [])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(null), 4200)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPaletteOpen(true)
+      } else if (event.key === 'Escape') {
+        if (paletteOpen) {
+          setPaletteOpen(false)
+          event.preventDefault()
+          return
+        }
+        if (consoleOpen) {
+          setConsoleOpen(false)
+          event.preventDefault()
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [paletteOpen, consoleOpen])
+
+  const bumpTimelineRefresh = useCallback(() => {
+    setTimelineRefreshKey((value) => value + 1)
+  }, [])
+
+  const commands: PaletteCommand[] = useMemo(
+    () => [
+      {
+        id: 'command.daily-digest',
+        title: 'Generate daily logbook',
+        description: 'Rebuild today\'s logbook summary and refresh the timeline view.',
+        keywords: ['logbook', 'timeline', 'digest'],
+        action: async () => {
+          try {
+            const job = await runDailyDigest()
+            const entryDate = job.result?.entry_date ?? 'today'
+            notify(`Daily digest refreshed for ${entryDate}.`, 'info')
+            bumpTimelineRefresh()
+            setTab('timeline')
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            notify(message, 'error')
+            throw error instanceof Error ? error : new Error(message)
+          }
+        },
+      },
+      {
+        id: 'command.open-timeline',
+        title: 'Open timeline & logbook',
+        description: 'Jump directly to the automated daily chronicle.',
+        keywords: ['journal'],
+        action: () => setTab('timeline'),
+      },
+      {
+        id: 'command.open-settings',
+        title: 'Open AI settings',
+        description: 'Configure providers, models, and credentials.',
+        keywords: ['ai', 'settings'],
+        action: () => setTab('settings'),
+      },
+      {
+        id: 'command.open-debugger',
+        title: 'Open AI debugger console',
+        description: 'Inspect recent AI runtime calls and diagnostics.',
+        keywords: ['debug', 'ai', 'console'],
+        action: () => setConsoleOpen(true),
+      },
+    ],
+    [bumpTimelineRefresh, notify]
+  )
 
   return (
     <div
@@ -125,14 +217,66 @@ export default function App() {
         </div>
         <nav style={{ display: 'grid', gap: 8 }}>
           <NavButton label="Notes" active={tab === 'notes'} onClick={() => setTab('notes')} />
+          <NavButton label="Timeline" active={tab === 'timeline'} onClick={() => setTab('timeline')} />
           <NavButton label="AI Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
         <div style={{ marginTop: 'auto', fontSize: 12, color: '#5d5f76' }}>
           <div>LLM ready</div>
           <div>Switch between cloud & local engines</div>
         </div>
+        <div style={{ marginTop: 12, fontSize: 12, color: '#717389' }}>Palette · ⌘K / Ctrl+K</div>
       </aside>
-      <main style={{ flex: 1, overflow: 'auto' }}>{tab === 'notes' ? <NotesPanel /> : <Settings />}</main>
+      <main
+        style={{
+          flex: 1,
+          overflow: 'auto',
+          background: '#12121a',
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {notice && (
+          <div
+            style={{
+              position: 'sticky',
+              top: 0,
+              zIndex: 5,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              padding: '12px 18px',
+              background: notice.kind === 'error' ? '#46242a' : '#1d2a44',
+              borderBottom: `1px solid ${notice.kind === 'error' ? '#703b3b' : '#2c3a55'}`,
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>{notice.text}</span>
+            <button
+              type="button"
+              onClick={dismissNotice}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 8,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: '#f5f5f5',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {tab === 'notes' && <NotesPanel onNotify={notify} />}
+          {tab === 'timeline' && <Timeline refreshKey={timelineRefreshKey} onNotify={notify} />}
+          {tab === 'settings' && <Settings />}
+        </div>
+      </main>
+      <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <Console open={consoleOpen} onClose={() => setConsoleOpen(false)} />
     </div>
   )
 }
