@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 
+/**
+ * Command palette command descriptor consumed by the Palette component.
+ * Commands can run synchronously or asynchronously and provide metadata used
+ * for fuzzy filtering.
+ */
 export interface PaletteCommand {
   id: string
   title: string
@@ -14,6 +19,11 @@ interface PaletteProps {
   commands: PaletteCommand[]
 }
 
+/**
+ * Modal command palette inspired by tools like Spotlight and Raycast. The
+ * component is deliberately self-contained so it can be embedded anywhere in
+ * the UI without additional wiring.
+ */
 export default function Palette({ open, onClose, commands }: PaletteProps) {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -64,6 +74,7 @@ export default function Palette({ open, onClose, commands }: PaletteProps) {
     }
   }, [filtered, activeIndex])
 
+  /** Execute the selected command while surfacing any runtime errors. */
   async function execute(command: PaletteCommand) {
     if (runningCommand) return
     try {
@@ -79,6 +90,7 @@ export default function Palette({ open, onClose, commands }: PaletteProps) {
     }
   }
 
+  /** Keyboard navigation for the results list. */
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (!filtered.length) return
     if (event.key === 'ArrowDown') {

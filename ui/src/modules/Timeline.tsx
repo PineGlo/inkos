@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { listLogbookEntries, listTimelineEvents, runDailyDigest, type LogbookEntry, type TimelineEvent } from '../lib/api'
 
+/** Props accepted by the timeline/logbook module. */
 interface TimelineProps {
   refreshKey: number
   onNotify?: (message: string, kind?: 'info' | 'error') => void
@@ -8,6 +9,10 @@ interface TimelineProps {
 
 type LoadingState = 'idle' | 'loading' | 'error'
 
+/**
+ * Daily timeline and logbook view. Fetches historical data and offers an
+ * inline action to regenerate the digest for the selected day.
+ */
 export default function Timeline({ refreshKey, onNotify }: TimelineProps) {
   const [entries, setEntries] = useState<LogbookEntry[]>([])
   const [selectedDate, setSelectedDate] = useState<string>('')
@@ -77,6 +82,7 @@ export default function Timeline({ refreshKey, onNotify }: TimelineProps) {
 
   const selectedEntry = useMemo(() => entries.find((entry) => entry.entry_date === selectedDate), [entries, selectedDate])
 
+  /** Re-run the daily digest for the selected entry and refresh state. */
   async function regenerateDigest() {
     setDigestBusy(true)
     setError(null)

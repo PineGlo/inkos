@@ -1,3 +1,8 @@
+//! Persistence layer for AI provider metadata and credentials.
+//!
+//! All reads/writes to the `ai_*` tables flow through this module so the
+//! surrounding application code can work with strongly typed data structures.
+
 use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::STANDARD as B64_ENGINE;
 use base64::Engine;
@@ -9,6 +14,7 @@ use time::OffsetDateTime;
 use super::providers::PROVIDER_SEEDS;
 use crate::logging::log_event;
 
+/// Serializable view of an AI provider record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiProviderInfo {
     pub id: String,
@@ -24,6 +30,7 @@ pub struct AiProviderInfo {
     pub has_credentials: bool,
 }
 
+/// Snapshot returned to the UI describing the active AI settings.
 #[derive(Debug, Clone, Serialize)]
 pub struct AiSettingsSnapshot {
     pub active_provider_id: Option<String>,
@@ -31,6 +38,7 @@ pub struct AiSettingsSnapshot {
     pub provider: Option<AiProviderInfo>,
 }
 
+/// Concrete provider/model/secret combination used for runtime calls.
 #[derive(Debug, Clone)]
 pub struct AiRuntimeSelection {
     pub provider: AiProviderInfo,
@@ -38,6 +46,7 @@ pub struct AiRuntimeSelection {
     pub secret: Option<String>,
 }
 
+/// Input payload accepted by [`update_settings`].
 #[derive(Debug, Clone)]
 pub struct AiSettingsUpdate {
     pub provider_id: String,
@@ -46,6 +55,7 @@ pub struct AiSettingsUpdate {
     pub base_url: Option<String>,
 }
 
+/// Insert baked-in AI provider defaults and ensure an active selection.
 pub fn seed_defaults(conn: &rusqlite::Connection) -> Result<()> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     for seed in PROVIDER_SEEDS {
@@ -101,6 +111,7 @@ pub fn seed_defaults(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Fetch all available providers ordered by display name.
 pub fn list_providers(conn: &rusqlite::Connection) -> Result<Vec<AiProviderInfo>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.kind, p.display_name, p.description, p.base_url, p.default_model, p.models_json, p.capabilities_json, p.requires_api_key, \
@@ -135,6 +146,7 @@ pub fn list_providers(conn: &rusqlite::Connection) -> Result<Vec<AiProviderInfo>
     Ok(providers)
 }
 
+/// Return the current active provider/model snapshot.
 pub fn get_settings(conn: &rusqlite::Connection) -> Result<AiSettingsSnapshot> {
     let (provider_id, model) = read_active_setting(conn)?;
     let provider = if let Some(ref pid) = provider_id {
@@ -149,6 +161,7 @@ pub fn get_settings(conn: &rusqlite::Connection) -> Result<AiSettingsSnapshot> {
     })
 }
 
+/// Persist provider/model/credential changes and return the new snapshot.
 pub fn update_settings(
     conn: &rusqlite::Connection,
     update: AiSettingsUpdate,
@@ -190,6 +203,7 @@ pub fn update_settings(
     get_settings(conn)
 }
 
+/// Determine which provider/model/secret should be used for a request.
 pub fn resolve_runtime(
     conn: &rusqlite::Connection,
     provider_override: Option<String>,
@@ -228,6 +242,7 @@ pub fn resolve_runtime(
     })
 }
 
+/// Read the active provider/model pair from `app_settings`.
 fn read_active_setting(conn: &rusqlite::Connection) -> Result<(Option<String>, Option<String>)> {
     let value: Option<String> = conn
         .query_row(
@@ -253,6 +268,7 @@ fn read_active_setting(conn: &rusqlite::Connection) -> Result<(Option<String>, O
     }
 }
 
+/// Persist the active provider/model pair to `app_settings`.
 fn set_active_setting(
     conn: &rusqlite::Connection,
     provider_id: &str,
@@ -272,6 +288,7 @@ fn set_active_setting(
     Ok(())
 }
 
+/// Load a single provider row or return an error when missing.
 fn get_provider(conn: &rusqlite::Connection, provider_id: &str) -> Result<AiProviderInfo> {
     conn.query_row(
         "SELECT p.id, p.kind, p.display_name, p.description, p.base_url, p.default_model, p.models_json, p.capabilities_json, p.requires_api_key,
@@ -300,6 +317,7 @@ fn get_provider(conn: &rusqlite::Connection, provider_id: &str) -> Result<AiProv
     .map_err(|_| anyhow!("Unknown AI provider: {provider_id}"))
 }
 
+/// Fetch and decrypt the stored API secret, if present.
 fn load_secret(conn: &rusqlite::Connection, provider_id: &str) -> Result<Option<String>> {
     let secret: Option<String> = conn
         .query_row(
@@ -321,6 +339,7 @@ fn load_secret(conn: &rusqlite::Connection, provider_id: &str) -> Result<Option<
     }
 }
 
+/// Emit a structured log entry describing a settings change.
 pub fn audit_settings_change(conn: &rusqlite::Connection, message: &str) {
     let _ = log_event(
         conn,
