@@ -1,0 +1,72 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSeed {
+    pub id: &'static str,
+    pub kind: &'static str,
+    pub display: &'static str,
+    pub description: &'static str,
+    pub base_url: Option<&'static str>,
+    pub default_model: &'static str,
+    pub models: &'static [&'static str],
+    pub tags: &'static [&'static str],
+    pub requires_api_key: bool,
+}
+
+pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
+    ProviderSeed {
+        id: "openai",
+        kind: "cloud",
+        display: "OpenAI GPT-4o",
+        description: "Access OpenAI's GPT-4o family for multimodal and general reasoning tasks.",
+        base_url: Some("https://api.openai.com"),
+        default_model: "gpt-4o-mini",
+        models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-3.5-turbo"],
+        tags: &["chat", "multimodal", "tools"],
+        requires_api_key: true,
+    },
+    ProviderSeed {
+        id: "anthropic",
+        kind: "cloud",
+        display: "Anthropic Claude 3",
+        description: "Claude 3 excels at long-context summarisation and analysis.",
+        base_url: Some("https://api.anthropic.com"),
+        default_model: "claude-3-opus-20240229",
+        models: &["claude-3-opus-20240229", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
+        tags: &["chat", "analysis", "long-context"],
+        requires_api_key: true,
+    },
+    ProviderSeed {
+        id: "google",
+        kind: "cloud",
+        display: "Google Gemini 2.5",
+        description: "Google's Gemini models provide fast multimodal reasoning and native Google integrations.",
+        base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
+        default_model: "models/gemini-2.0-flash",
+        models: &["models/gemini-2.0-flash", "models/gemini-1.5-pro", "models/gemini-1.5-flash"],
+        tags: &["chat", "multimodal"],
+        requires_api_key: true,
+    },
+    ProviderSeed {
+        id: "ollama",
+        kind: "local",
+        display: "Ollama (Local)",
+        description: "Run open-weight models like Llama 3 or Mistral on local hardware.",
+        base_url: Some("http://127.0.0.1:11434"),
+        default_model: "llama3.1",
+        models: &["llama3.1", "mistral", "codellama", "phi3"],
+        tags: &["chat", "local"],
+        requires_api_key: false,
+    },
+    ProviderSeed {
+        id: "lmstudio",
+        kind: "local",
+        display: "LM Studio (Local OpenAI API)",
+        description: "Connect to LM Studio's OpenAI-compatible local server.",
+        base_url: Some("http://127.0.0.1:1234/v1"),
+        default_model: "lmstudio-community/llama-3-8b-instruct",
+        models: &["lmstudio-community/llama-3-8b-instruct", "lmstudio-community/qwen2-7b-instruct"],
+        tags: &["chat", "local", "openai-compatible"],
+        requires_api_key: false,
+    },
+];

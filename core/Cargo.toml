@@ -20,3 +20,6 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 anyhow = "1"
 log = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+base64 = "0.21"
