@@ -80,3 +80,53 @@ export async function aiUpdateSettings(payload: AiUpdateSettingsPayload): Promis
 export async function aiChat(payload: AiChatCommand): Promise<AiChatResponse> {
   return invoke('ai_chat', { input: payload })
 }
+
+export interface LogbookEntry {
+  id: string
+  entry_date: string
+  summary: string
+  created_at: number
+}
+
+export interface TimelineEvent {
+  id: string
+  entry_date: string
+  event_time: number
+  kind: string
+  title: string
+  detail?: string | null
+  created_at: number
+}
+
+export interface AiRuntimeEvent {
+  id: string
+  ts: number
+  level: string
+  code?: string | null
+  message: string
+  explain?: string | null
+  data?: unknown
+}
+
+export interface JobRunResult<T = unknown> {
+  job_id: string
+  kind: string
+  state: string
+  result: T
+}
+
+export async function listLogbookEntries(limit?: number): Promise<LogbookEntry[]> {
+  return invoke('list_logbook_entries', { limit })
+}
+
+export async function listTimelineEvents(date?: string): Promise<TimelineEvent[]> {
+  return invoke('list_timeline_events', { date })
+}
+
+export async function listAiEvents(limit?: number): Promise<AiRuntimeEvent[]> {
+  return invoke('list_ai_events', { limit })
+}
+
+export async function runDailyDigest(date?: string): Promise<JobRunResult<{ entry_date: string; logbook: LogbookEntry; timeline: TimelineEvent[] }>> {
+  return invoke('run_daily_digest', { date })
+}

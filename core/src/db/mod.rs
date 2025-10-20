@@ -37,6 +37,13 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
                 "/../migrations/0002_ai_settings.sql"
             )),
         ),
+        (
+            "0003_logbook_timeline.sql",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../migrations/0003_logbook_timeline.sql"
+            )),
+        ),
     ];
 
     for (name, sql) in migrations {
