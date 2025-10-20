@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useSettingsStore } from '../state/settings'
 
+/** Simple pill used for displaying provider capability tags. */
 function Badge({ label }: { label: string }) {
   return (
     <span
@@ -19,6 +20,10 @@ function Badge({ label }: { label: string }) {
   )
 }
 
+/**
+ * AI settings surface. Delegates most logic to the Zustand store so the view
+ * remains declarative and focused on UX details.
+ */
 export default function Settings() {
   const {
     providers,

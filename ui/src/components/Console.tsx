@@ -1,11 +1,16 @@
 import React, { useEffect, useState } from 'react'
 import { listAiEvents, type AiRuntimeEvent } from '../lib/api'
 
+/** Props consumed by the AI debugger console modal. */
 interface ConsoleProps {
   open: boolean
   onClose: () => void
 }
 
+/**
+ * Modal surface that renders the AI runtime event log. Fetching happens when
+ * the dialog opens so the UI always shows the most recent diagnostics.
+ */
 export default function Console({ open, onClose }: ConsoleProps) {
   const [events, setEvents] = useState<AiRuntimeEvent[]>([])
   const [loading, setLoading] = useState(false)
@@ -28,6 +33,7 @@ export default function Console({ open, onClose }: ConsoleProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
 
+  /** Load the latest AI runtime events. */
   async function loadEvents() {
     setLoading(true)
     setError(null)
@@ -196,6 +202,7 @@ export default function Console({ open, onClose }: ConsoleProps) {
   )
 }
 
+/** Presentational helper that maps log levels onto colour tokens. */
 function badgeColor(level: string): { background: string; color: string } {
   switch (level) {
     case 'error':
