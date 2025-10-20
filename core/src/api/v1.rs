@@ -339,6 +339,7 @@ pub async fn run_daily_digest(
 
 /// Ensure the daily digest job has been scheduled for the current day.
 fn ensure_today_digest(state: &State<ApiState>) -> Result<(), String> {
+fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
     let today = OffsetDateTime::now_utc().date().to_string();
     let missing = {
         let conn = state.db.get().map_err(|e| e.to_string())?;

@@ -7,6 +7,10 @@
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
+//! Synchronous worker implementations invoked from IPC commands.
+//!
+//! These helpers run inside the same process but are isolated from the UI
+//! thread. They return JSON payloads so the frontend can render rich status.
 
 use anyhow::{anyhow, Context, Result};
 use log::error;
@@ -31,6 +35,8 @@ const DAILY_DIGEST_JOB: &str = "workspace.daily_digest";
 
 /// Result payload returned when a worker completes a job.
 #[derive(Debug, Clone, Serialize)]
+/// Result payload returned when a worker completes a job.
+#[derive(Debug, Serialize)]
 pub struct JobRunResult {
     pub job_id: String,
     pub kind: String,
@@ -208,6 +214,8 @@ fn persist_job_with_conn(
     payload: &Value,
     run_at: Option<i64>,
 ) -> Result<String> {
+/// Persist a job row and immediately execute it.
+pub fn enqueue_job(conn: &Connection, kind: &str, payload: Value) -> Result<JobRunResult> {
     let id = Uuid::new_v4().to_string();
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(
@@ -226,6 +234,7 @@ fn run_job(
     kind: &str,
     payload: Value,
 ) -> Result<JobRunResult> {
+fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<JobRunResult> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(
         "UPDATE jobs SET state='running', updated_at=?2 WHERE id=?1",
@@ -268,6 +277,7 @@ fn run_job(
 
 /// Generate the logbook summary and timeline entries for a given day.
 fn perform_daily_digest(conn: &Connection, ai: &AiOrchestrator, payload: &Value) -> Result<Value> {
+fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
     let date = resolve_entry_date(payload)?;
     let date_key = date.to_string();
     let start_ts = date
