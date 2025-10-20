@@ -1,5 +1,8 @@
+//! Static catalogue of AI provider defaults bundled with the app.
+
 use serde::{Deserialize, Serialize};
 
+/// Describes a baked-in provider configuration that can seed the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSeed {
     pub id: &'static str,
@@ -13,6 +16,7 @@ pub struct ProviderSeed {
     pub requires_api_key: bool,
 }
 
+/// Providers the runtime knows about out of the box.
 pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
     ProviderSeed {
         id: "openai",

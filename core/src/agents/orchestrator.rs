@@ -1,3 +1,9 @@
+//! HTTP chat orchestration across multiple AI providers.
+//!
+//! The orchestrator exposes a single `chat` method that fan-outs to provider
+//! specific HTTP APIs (OpenAI, Anthropic, Gemini, Ollama, LM Studio). All
+//! responses are normalised into a consistent structure for the UI layer.
+
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -7,18 +13,21 @@ use serde_json::Value;
 
 use super::config::AiRuntimeSelection;
 
+/// Canonical representation of a chat message fed into an AI provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatMessage {
     pub role: String,
     pub content: String,
 }
 
+/// Request payload given to [`AiOrchestrator::chat`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatInput {
     pub messages: Vec<AiChatMessage>,
     pub temperature: Option<f32>,
 }
 
+/// Usage metrics reported by certain providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiUsageMetrics {
     pub prompt_tokens: Option<u32>,
@@ -26,6 +35,7 @@ pub struct AiUsageMetrics {
     pub total_tokens: Option<u32>,
 }
 
+/// Normalised chat response returned to the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatResponse {
     pub provider_id: String,
@@ -35,11 +45,13 @@ pub struct AiChatResponse {
     pub raw: Value,
 }
 
+/// Thin wrapper around a configured [`reqwest::Client`].
 pub struct AiOrchestrator {
     client: Client,
 }
 
 impl AiOrchestrator {
+    /// Construct a new orchestrator with sane HTTP defaults.
     pub fn new() -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(45))
@@ -49,6 +61,10 @@ impl AiOrchestrator {
         Ok(Self { client })
     }
 
+    /// Execute a chat completion against the selected runtime.
+    ///
+    /// Provider specific behaviour is handled internally so that callers only
+    /// need to supply the [`AiRuntimeSelection`] and desired message history.
     pub async fn chat(
         &self,
         selection: &AiRuntimeSelection,
@@ -76,6 +92,7 @@ impl AiOrchestrator {
         }
     }
 
+    /// Call the OpenAI Chat Completions API.
     async fn chat_openai(
         &self,
         selection: &AiRuntimeSelection,
@@ -89,6 +106,10 @@ impl AiOrchestrator {
             .with_context(|| "OpenAI request failed".to_string())
     }
 
+    /// Invoke an OpenAI-compatible API endpoint.
+    ///
+    /// This path is shared by OpenAI, LM Studio, and any custom provider that
+    /// exposes the same JSON contract.
     async fn chat_openai_like(
         &self,
         selection: &AiRuntimeSelection,
@@ -137,6 +158,7 @@ impl AiOrchestrator {
         })
     }
 
+    /// Call LM Studio using its OpenAI-compatible surface.
     async fn chat_lmstudio(
         &self,
         selection: &AiRuntimeSelection,
@@ -145,6 +167,7 @@ impl AiOrchestrator {
         self.chat_openai_like(selection, input, false).await
     }
 
+    /// Call Anthropic's Messages API.
     async fn chat_anthropic(
         &self,
         selection: &AiRuntimeSelection,
@@ -221,6 +244,7 @@ impl AiOrchestrator {
         })
     }
 
+    /// Call Google's Gemini API.
     async fn chat_gemini(
         &self,
         selection: &AiRuntimeSelection,
@@ -282,6 +306,7 @@ impl AiOrchestrator {
         })
     }
 
+    /// Call the local Ollama HTTP API.
     async fn chat_ollama(
         &self,
         selection: &AiRuntimeSelection,
@@ -325,6 +350,7 @@ impl AiOrchestrator {
     }
 }
 
+/// Convert high level chat messages into the OpenAI JSON wire format.
 fn normalise_messages(messages: &[AiChatMessage]) -> Vec<Value> {
     messages
         .iter()
@@ -342,6 +368,7 @@ fn normalise_messages(messages: &[AiChatMessage]) -> Vec<Value> {
         .collect()
 }
 
+/// Pull token counts from OpenAI-style response bodies.
 fn extract_openai_usage(body: &Value) -> Option<AiUsageMetrics> {
     body.get("usage").map(|usage| AiUsageMetrics {
         prompt_tokens: usage
@@ -359,6 +386,7 @@ fn extract_openai_usage(body: &Value) -> Option<AiUsageMetrics> {
     })
 }
 
+/// Pull token counts from Anthropic responses.
 fn extract_anthropic_usage(body: &Value) -> Option<AiUsageMetrics> {
     body.get("usage").map(|usage| AiUsageMetrics {
         prompt_tokens: usage
@@ -373,6 +401,7 @@ fn extract_anthropic_usage(body: &Value) -> Option<AiUsageMetrics> {
     })
 }
 
+/// Collapse chat messages into a single plain-text prompt (Gemini helper).
 fn build_conversation_prompt(messages: &[AiChatMessage]) -> String {
     let mut sections = Vec::new();
     for msg in messages {

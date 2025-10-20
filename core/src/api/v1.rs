@@ -1,3 +1,9 @@
+//! Version 1 of the Tauri IPC API.
+//!
+//! Commands are intentionally thin wrappers that validate input, execute work
+//! on background threads where needed, and return JSON-friendly payloads to
+//! the UI.
+
 use std::sync::Arc;
 
 use crate::agents::config::{self, AiSettingsUpdate};
@@ -14,12 +20,14 @@ use time::Date;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// Shared state injected into each Tauri command handler.
 #[derive(Clone)]
 pub struct ApiState {
     pub db: DbPool,
     pub ai: Arc<AiOrchestrator>,
 }
 
+/// Simple health-check endpoint for UI components.
 #[tauri::command]
 pub fn ping() -> serde_json::Value {
     serde_json::json!({
@@ -28,6 +36,7 @@ pub fn ping() -> serde_json::Value {
     })
 }
 
+/// Inspect the SQLite catalog to confirm the database is reachable.
 #[tauri::command]
 pub fn db_status(state: State<ApiState>) -> Result<serde_json::Value, String> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
@@ -54,6 +63,7 @@ pub struct CreateNoteOutput {
     pub id: String,
 }
 
+/// Persist a note and log the action for the activity feed.
 #[tauri::command]
 pub fn create_note(
     state: State<ApiState>,
@@ -86,6 +96,7 @@ pub struct ListNotesInput {
     pub q: Option<String>,
 }
 
+/// Return notes optionally filtered by a full-text query.
 #[tauri::command]
 pub fn list_notes(
     state: State<ApiState>,
@@ -129,6 +140,7 @@ pub fn list_notes(
     Ok(results)
 }
 
+/// Summarised view of each logbook record.
 #[derive(Serialize)]
 pub struct LogbookEntry {
     pub id: String,
@@ -137,6 +149,7 @@ pub struct LogbookEntry {
     pub created_at: i64,
 }
 
+/// List daily logbook entries, ensuring today's digest is queued if missing.
 #[tauri::command]
 pub fn list_logbook_entries(
     state: State<ApiState>,
@@ -187,6 +200,7 @@ pub fn list_logbook_entries(
     Ok(entries)
 }
 
+/// Timeline event DTO surfaced to the frontend.
 #[derive(Serialize)]
 pub struct TimelineEvent {
     pub id: String,
@@ -198,6 +212,7 @@ pub struct TimelineEvent {
     pub created_at: i64,
 }
 
+/// Fetch timeline events for a specific day.
 #[tauri::command]
 pub fn list_timeline_events(
     state: State<ApiState>,
@@ -239,6 +254,7 @@ pub fn list_timeline_events(
     Ok(events)
 }
 
+/// Structured AI runtime event surfaced in the debugger UI.
 #[derive(Serialize)]
 pub struct AiRuntimeEvent {
     pub id: String,
@@ -250,6 +266,7 @@ pub struct AiRuntimeEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Return recent AI runtime events for diagnostics.
 #[tauri::command]
 pub fn list_ai_events(
     state: State<ApiState>,
@@ -301,6 +318,7 @@ fn map_ai_event(row: &r2d2_sqlite::rusqlite::Row) -> r2d2_sqlite::rusqlite::Resu
     })
 }
 
+/// Trigger the daily digest worker immediately.
 #[tauri::command]
 pub fn run_daily_digest(
     state: State<ApiState>,
@@ -315,6 +333,7 @@ pub fn run_daily_digest(
     workers::enqueue_job(&conn, "workspace.daily_digest", payload).map_err(|e| e.to_string())
 }
 
+/// Ensure the daily digest job has been scheduled for the current day.
 fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
     let today = OffsetDateTime::now_utc().date().to_string();
     let mut stmt = conn
@@ -331,6 +350,7 @@ fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
     Ok(())
 }
 
+/// List available AI providers via a blocking thread pool.
 #[tauri::command]
 pub async fn ai_list_providers(
     state: State<'_, ApiState>,
@@ -344,6 +364,7 @@ pub async fn ai_list_providers(
     .map_err(|e| e.to_string())?
 }
 
+/// Fetch the current AI settings snapshot via a blocking thread pool.
 #[tauri::command]
 pub async fn ai_get_settings(
     state: State<'_, ApiState>,
@@ -365,6 +386,7 @@ pub struct AiUpdateSettingsInput {
     pub base_url: Option<String>,
 }
 
+/// Update AI provider settings from the UI.
 #[tauri::command]
 pub async fn ai_update_settings(
     state: State<'_, ApiState>,
@@ -404,6 +426,7 @@ pub struct AiChatCommandInput {
     pub model: Option<String>,
 }
 
+/// Execute a chat completion via the orchestrator and record the result.
 #[tauri::command]
 pub async fn ai_chat(
     state: State<'_, ApiState>,

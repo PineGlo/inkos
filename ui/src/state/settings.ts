@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { AiChatResponse, AiProviderInfo, AiSettingsSnapshot, AiUpdateSettingsPayload } from '../lib/api'
 import { aiChat, aiGetSettings, aiListProviders, aiUpdateSettings } from '../lib/api'
 
+/** Normalised provider shape tailored for the UI. */
 export type UiProvider = {
   id: string
   kind: string
@@ -15,6 +16,7 @@ export type UiProvider = {
   hasCredentials: boolean
 }
 
+/** Complete settings store contract exposed via Zustand. */
 type SettingsState = {
   providers: UiProvider[]
   loading: boolean
@@ -42,6 +44,7 @@ type SettingsState = {
   clearStatus: () => void
 }
 
+/** Convert API provider records into UI friendly structures. */
 function mapProvider(info: AiProviderInfo): UiProvider {
   return {
     id: info.id,
@@ -57,11 +60,16 @@ function mapProvider(info: AiProviderInfo): UiProvider {
   }
 }
 
+/** Choose a sensible default model for the given provider. */
 function deriveModel(provider?: UiProvider): string | undefined {
   if (!provider) return undefined
   return provider.defaultModel ?? provider.models[0]
 }
 
+/**
+ * Zustand store coordinating API calls, optimistic updates, and transient UI
+ * state for the AI settings panel.
+ */
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   providers: [],
   loading: false,

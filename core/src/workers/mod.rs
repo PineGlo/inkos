@@ -1,3 +1,8 @@
+//! Synchronous worker implementations invoked from IPC commands.
+//!
+//! These helpers run inside the same process but are isolated from the UI
+//! thread. They return JSON payloads so the frontend can render rich status.
+
 use anyhow::{anyhow, Context, Result};
 use r2d2_sqlite::rusqlite::Connection;
 use r2d2_sqlite::rusqlite::{params, OptionalExtension};
@@ -9,6 +14,7 @@ use uuid::Uuid;
 
 use crate::logging::log_event;
 
+/// Result payload returned when a worker completes a job.
 #[derive(Debug, Serialize)]
 pub struct JobRunResult {
     pub job_id: String,
@@ -19,6 +25,7 @@ pub struct JobRunResult {
 
 const DAILY_DIGEST_JOB: &str = "workspace.daily_digest";
 
+/// Persist a job row and immediately execute it.
 pub fn enqueue_job(conn: &Connection, kind: &str, payload: Value) -> Result<JobRunResult> {
     let id = Uuid::new_v4().to_string();
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -31,6 +38,7 @@ pub fn enqueue_job(conn: &Connection, kind: &str, payload: Value) -> Result<JobR
     run_job(conn, &id, kind, payload)
 }
 
+/// Run a job and update its persisted state transitions.
 fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<JobRunResult> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(
@@ -72,6 +80,7 @@ fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<Jo
     }
 }
 
+/// Generate the logbook summary and timeline entries for a given day.
 fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
     let date = resolve_entry_date(payload)?;
     let date_key = date.to_string();
@@ -175,6 +184,7 @@ fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
     }))
 }
 
+/// Insert or update the daily logbook entry for `entry_date`.
 fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> Result<Value> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let existing: Option<(String, i64)> = conn
@@ -215,6 +225,7 @@ fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> R
     }))
 }
 
+/// Recreate the derived timeline events backing the daily digest view.
 fn rebuild_timeline(
     conn: &Connection,
     entry_date: &str,
@@ -277,6 +288,7 @@ fn rebuild_timeline(
     Ok(Value::Array(events))
 }
 
+/// Persist a single timeline event and return its serialised form.
 fn create_timeline_event(
     conn: &Connection,
     entry_date: &str,
@@ -304,6 +316,7 @@ fn create_timeline_event(
     }))
 }
 
+/// Resolve the target date for a digest run, defaulting to today.
 fn resolve_entry_date(payload: &Value) -> Result<Date> {
     if let Some(date_str) = payload.get("date").and_then(Value::as_str) {
         Date::parse(date_str, &format_description!("[year]-[month]-[day]"))
@@ -313,6 +326,7 @@ fn resolve_entry_date(payload: &Value) -> Result<Date> {
     }
 }
 
+/// Helper for English pluralisation of counts.
 fn plural(count: i64) -> &'static str {
     if count == 1 {
         ""

@@ -5,8 +5,16 @@ import Palette, { type PaletteCommand } from '../components/Palette'
 import Console from '../components/Console'
 import { ping, createNote, listNotes, runDailyDigest } from '../lib/api'
 
+/**
+ * Minimal note object used within the demo sandbox list. The canonical schema
+ * lives in the Rust layer but the UI keeps this lightweight for ergonomics.
+ */
 type Note = { id: string; title: string; created_at: number }
 
+/**
+ * Notes sandbox demonstrating synchronous IPC calls (ping + note creation).
+ * Notifications bubble up to the root layout so they can be surfaced globally.
+ */
 function NotesPanel({ onNotify }: { onNotify?: (message: string, kind?: 'info' | 'error') => void }) {
   const [status, setStatus] = useState('Checking core...')
   const [title, setTitle] = useState('Hello InkOS (v2)')
@@ -100,6 +108,10 @@ type TabKey = 'notes' | 'timeline' | 'settings'
 
 type Notice = { text: string; kind: 'info' | 'error' }
 
+/**
+ * Root InkOS shell component containing the sidebar navigation, command
+ * palette, AI console, and routed module panels.
+ */
 export default function App() {
   const [tab, setTab] = useState<TabKey>('notes')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -281,6 +293,7 @@ export default function App() {
   )
 }
 
+/** Presentational sidebar navigation button. */
 function NavButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button
