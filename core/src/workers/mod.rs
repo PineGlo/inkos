@@ -95,7 +95,6 @@ impl JobScheduler {
     pub async fn run_now(&self, kind: &str, payload: Value) -> Result<JobRunResult> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let job_id = self.persist_job(kind, &payload, Some(now)).await?;
-        self.wake();
         let result = self
             .run_existing_job(PendingJob {
                 id: job_id.clone(),
