@@ -10,8 +10,8 @@ use crate::agents::config::{self, AiSettingsUpdate};
 use crate::agents::{AiChatInput, AiChatMessage, AiChatResponse, AiOrchestrator};
 use crate::db::DbPool;
 use crate::logging::log_event;
-use crate::workers::{self, JobRunResult};
-use r2d2_sqlite::rusqlite::{Connection as SqliteConnection, OptionalExtension};
+use crate::workers::{JobRunResult, JobScheduler};
+use r2d2_sqlite::rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{async_runtime::spawn_blocking, State};
@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub struct ApiState {
     pub db: DbPool,
     pub ai: Arc<AiOrchestrator>,
+    pub scheduler: Arc<JobScheduler>,
 }
 
 /// Simple health-check endpoint for UI components.
@@ -155,8 +156,8 @@ pub fn list_logbook_entries(
     state: State<ApiState>,
     limit: Option<usize>,
 ) -> Result<Vec<LogbookEntry>, String> {
+    ensure_today_digest(&state)?;
     let conn = state.db.get().map_err(|e| e.to_string())?;
-    ensure_today_digest(&conn)?;
 
     let mut entries = Vec::new();
     if let Some(limit) = limit {
@@ -218,8 +219,8 @@ pub fn list_timeline_events(
     state: State<ApiState>,
     date: Option<String>,
 ) -> Result<Vec<TimelineEvent>, String> {
+    ensure_today_digest(&state)?;
     let conn = state.db.get().map_err(|e| e.to_string())?;
-    ensure_today_digest(&conn)?;
 
     let resolved_date = if let Some(value) = date {
         Date::parse(&value, &format_description!("[year]-[month]-[day]"))
@@ -320,31 +321,41 @@ fn map_ai_event(row: &r2d2_sqlite::rusqlite::Row) -> r2d2_sqlite::rusqlite::Resu
 
 /// Trigger the daily digest worker immediately.
 #[tauri::command]
-pub fn run_daily_digest(
-    state: State<ApiState>,
+pub async fn run_daily_digest(
+    state: State<'_, ApiState>,
     date: Option<String>,
 ) -> Result<JobRunResult, String> {
-    let conn = state.db.get().map_err(|e| e.to_string())?;
     let payload = if let Some(value) = date {
         json!({ "date": value })
     } else {
         json!({})
     };
-    workers::enqueue_job(&conn, "workspace.daily_digest", payload).map_err(|e| e.to_string())
+    state
+        .scheduler
+        .run_now("workspace.daily_digest", payload)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Ensure the daily digest job has been scheduled for the current day.
+fn ensure_today_digest(state: &State<ApiState>) -> Result<(), String> {
 fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
     let today = OffsetDateTime::now_utc().date().to_string();
-    let mut stmt = conn
-        .prepare("SELECT id FROM logbook_entries WHERE entry_date = ?1 LIMIT 1")
-        .map_err(|e| e.to_string())?;
-    let existing: Option<String> = stmt
-        .query_row([today.as_str()], |row| row.get(0))
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if existing.is_none() {
-        let _ = workers::enqueue_job(conn, "workspace.daily_digest", json!({}))
+    let missing = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM logbook_entries WHERE entry_date = ?1 LIMIT 1")
+            .map_err(|e| e.to_string())?;
+        let existing: Option<String> = stmt
+            .query_row([today.as_str()], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        existing.is_none()
+    };
+    if missing {
+        let _ = state
+            .scheduler
+            .run_now_blocking("workspace.daily_digest", json!({ "date": today }))
             .map_err(|e| e.to_string())?;
     }
     Ok(())

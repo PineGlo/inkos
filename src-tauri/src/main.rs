@@ -1,10 +1,11 @@
+use directories::ProjectDirs;
+use inkos_core::agents::AiOrchestrator;
+use inkos_core::api::v1::{self, ApiState};
+use inkos_core::db::init_db;
+use inkos_core::workers::JobScheduler;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
-use inkos_core::api::v1::{self, ApiState};
-use inkos_core::db::init_db;
-use inkos_core::agents::AiOrchestrator;
-use directories::ProjectDirs;
 
 fn workspace_dir() -> PathBuf {
     if let Some(proj) = ProjectDirs::from("com", "InkOS", "InkOS") {
@@ -18,8 +19,12 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let db = init_db(workspace_dir()).expect("failed to init db");
-            let ai = AiOrchestrator::new().expect("failed to initialise AI orchestrator");
-            app.manage(ApiState { db, ai: Arc::new(ai) });
+            let ai = Arc::new(AiOrchestrator::new().expect("failed to initialise AI orchestrator"));
+            let scheduler = JobScheduler::new(db.clone(), Arc::clone(&ai));
+            if let Err(err) = scheduler.ensure_nightly_digest_schedule_blocking() {
+                eprintln!("failed to prime nightly digest schedule: {err}");
+            }
+            app.manage(ApiState { db, ai, scheduler });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
