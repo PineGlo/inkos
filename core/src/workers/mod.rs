@@ -1,8 +1,12 @@
 use r2d2_sqlite::rusqlite::Connection;
-use uuid::Uuid;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
-pub fn enqueue_job(conn: &Connection, kind: &str, payload: serde_json::Value) -> rusqlite::Result<String> {
+pub fn enqueue_job(
+    conn: &Connection,
+    kind: &str,
+    payload: serde_json::Value,
+) -> rusqlite::Result<String> {
     let id = Uuid::new_v4().to_string();
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(

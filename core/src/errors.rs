@@ -1,9 +1,12 @@
 use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum InkOsError {
-    #[error("Database unavailable")] DbUnavailable,
-    #[error("Note not found")] NoteNotFound,
-    #[error("Unknown error")] Unknown,
+    #[error("Database unavailable")]
+    DbUnavailable,
+    #[error("Note not found")]
+    NoteNotFound,
+    #[error("Unknown error")]
+    Unknown,
 }
 impl InkOsError {
     pub fn code(&self) -> &'static str {

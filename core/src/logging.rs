@@ -1,9 +1,17 @@
-use r2d2_sqlite::rusqlite::{Connection, params};
+use r2d2_sqlite::rusqlite::{params, Connection};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use serde_json::Value;
 
-pub fn log_event(conn: &Connection, level: &str, code: Option<&str>, module: &str, message: &str, explain: Option<&str>, data: Option<Value>) -> rusqlite::Result<()> {
+pub fn log_event(
+    conn: &Connection,
+    level: &str,
+    code: Option<&str>,
+    module: &str,
+    message: &str,
+    explain: Option<&str>,
+    data: Option<Value>,
+) -> rusqlite::Result<()> {
     let id = Uuid::new_v4().to_string();
     let ts = OffsetDateTime::now_utc().unix_timestamp();
     let data_str = data.map(|v| v.to_string());
