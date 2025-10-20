@@ -1,0 +1,16 @@
+[package]
+name = "inkos_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2.0.0", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+inkos_core = { path = "../core" }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+directories = "5"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
