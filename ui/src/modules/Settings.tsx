@@ -32,6 +32,11 @@ export default function Settings() {
     activeModel,
     draftProviderId,
     draftModel,
+    warnRatio,
+    forceRatio,
+    draftWarnRatio,
+    draftForceRatio,
+    draftSummarizerModel,
     draftApiKey,
     draftBaseUrl,
     statusMessage,
@@ -44,6 +49,9 @@ export default function Settings() {
     loadCurrentSettings,
     selectProvider,
     setDraftModel,
+    setDraftWarnRatio,
+    setDraftForceRatio,
+    setDraftSummarizerModel,
     setDraftApiKey,
     setDraftBaseUrl,
     markClearSecret,
@@ -75,7 +83,36 @@ export default function Settings() {
     return selectedProvider.capabilityTags.map((cap) => <Badge key={cap} label={cap} />)
   }, [selectedProvider])
 
+  const summarizerModelOptions = useMemo(() => {
+    const seen = new Set<string>()
+    const options: string[] = []
+    providers.forEach((provider) => {
+      provider.models.forEach((model) => {
+        if (!seen.has(model)) {
+          seen.add(model)
+          options.push(model)
+        }
+      })
+    })
+    return options.sort((a, b) => a.localeCompare(b))
+  }, [providers])
+
   const actionDisabled = saving || testing
+
+  const warnPercent = Math.round(draftWarnRatio * 100)
+  const forcePercent = Math.round(draftForceRatio * 100)
+
+  function handleWarnChange(value: number) {
+    if (Number.isNaN(value)) return
+    const clamped = Math.min(Math.max(value, 1), 99)
+    setDraftWarnRatio(clamped / 100)
+  }
+
+  function handleForceChange(value: number) {
+    if (Number.isNaN(value)) return
+    const clamped = Math.min(Math.max(value, 2), 100)
+    setDraftForceRatio(clamped / 100)
+  }
 
   return (
     <div style={{ padding: 24, color: '#f5f5f5', maxWidth: 860 }}>
@@ -252,6 +289,92 @@ export default function Settings() {
           </div>
         </section>
 
+        <section style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 16, padding: 20 }}>
+          <header style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: 0 }}>Context &amp; Rollover</h3>
+            <p style={{ margin: '4px 0 0', color: '#9ea0b5' }}>
+              Tune when InkOS warns about growing context and when it automatically rolls a conversation into a fresh thread. The
+              assistant carries forward a concise summary so you never lose the plot.
+            </p>
+          </header>
+          <div style={{ display: 'grid', gap: 16 }}>
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ fontSize: 14, color: '#d2d3de' }}>Warning threshold (%)</span>
+              <input
+                type="number"
+                min={1}
+                max={95}
+                step={1}
+                value={warnPercent}
+                onChange={(event) => handleWarnChange(Number(event.target.value))}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  background: '#15161d',
+                  color: '#f5f5f5',
+                  border: '1px solid #262839',
+                  width: '100%',
+                }}
+              />
+              <span style={{ fontSize: 12, color: '#7d7f92' }}>
+                Currently saved at {(warnRatio * 100).toFixed(0)}%. The chat view shows a yellow banner past this point.
+              </span>
+            </label>
+
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ fontSize: 14, color: '#d2d3de' }}>Auto-rollover threshold (%)</span>
+              <input
+                type="number"
+                min={2}
+                max={99}
+                step={1}
+                value={forcePercent}
+                onChange={(event) => handleForceChange(Number(event.target.value))}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  background: '#15161d',
+                  color: '#f5f5f5',
+                  border: '1px solid #262839',
+                  width: '100%',
+                }}
+              />
+              <span style={{ fontSize: 12, color: '#7d7f92' }}>
+                Currently saved at {(forceRatio * 100).toFixed(0)}%. Crossing this rolls the conversation and seeds the next thread
+                with a summary.
+              </span>
+            </label>
+
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ fontSize: 14, color: '#d2d3de' }}>Summariser model</span>
+              <select
+                value={draftSummarizerModel ?? ''}
+                onChange={(event) => {
+                  const value = event.target.value
+                  setDraftSummarizerModel(value ? value : undefined)
+                }}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  background: '#15161d',
+                  color: '#f5f5f5',
+                  border: '1px solid #262839',
+                }}
+              >
+                <option value="">Same as active chat model</option>
+                {summarizerModelOptions.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+              <span style={{ fontSize: 12, color: '#7d7f92' }}>
+                Pick a lightweight local model for nightly digests or stick with the main assistant model for richer prose.
+              </span>
+            </label>
+          </div>
+        </section>
+
         <section style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 16, padding: 20 }}>
           <header style={{ marginBottom: 12 }}>
             <h3 style={{ margin: 0 }}>Status</h3>
@@ -264,6 +387,10 @@ export default function Settings() {
               <strong>Active provider:</strong> {activeProviderId ?? 'Not set'}
               <br />
               <strong>Active model:</strong> {activeModel ?? 'Not set'}
+              <br />
+              <strong>Warn ratio:</strong> {(warnRatio * 100).toFixed(0)}%
+              <br />
+              <strong>Auto-roll ratio:</strong> {(forceRatio * 100).toFixed(0)}%
             </div>
             {statusMessage && (
               <div style={{ color: '#7ce38b', fontSize: 14, background: 'rgba(62, 125, 80, 0.25)', padding: '10px 12px', borderRadius: 10 }}>

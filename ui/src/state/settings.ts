@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AiChatResponse, AiProviderInfo, AiSettingsSnapshot, AiUpdateSettingsPayload } from '../lib/api'
+import type { AiChatResponse, AiProviderInfo, AiSettingsView, AiUpdateSettingsPayload } from '../lib/api'
 import { aiChat, aiGetSettings, aiListProviders, aiUpdateSettings } from '../lib/api'
 
 /** Normalised provider shape tailored for the UI. */
@@ -24,6 +24,11 @@ type SettingsState = {
   activeModel?: string
   draftProviderId?: string
   draftModel?: string
+  warnRatio: number
+  forceRatio: number
+  draftWarnRatio: number
+  draftForceRatio: number
+  draftSummarizerModel?: string
   draftApiKey: string
   draftBaseUrl: string
   statusMessage?: string
@@ -36,6 +41,9 @@ type SettingsState = {
   loadCurrentSettings: () => Promise<void>
   selectProvider: (id: string) => void
   setDraftModel: (model: string) => void
+  setDraftWarnRatio: (value: number) => void
+  setDraftForceRatio: (value: number) => void
+  setDraftSummarizerModel: (value?: string) => void
   setDraftApiKey: (value: string) => void
   setDraftBaseUrl: (value: string) => void
   markClearSecret: () => void
@@ -77,6 +85,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   activeModel: undefined,
   draftProviderId: undefined,
   draftModel: undefined,
+  warnRatio: 0.75,
+  forceRatio: 0.9,
+  draftWarnRatio: 0.75,
+  draftForceRatio: 0.9,
+  draftSummarizerModel: undefined,
   draftApiKey: '',
   draftBaseUrl: '',
   statusMessage: undefined,
@@ -108,7 +121,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
   async loadCurrentSettings() {
     try {
-      const snapshot: AiSettingsSnapshot = await aiGetSettings()
+      const snapshot: AiSettingsView = await aiGetSettings()
       set((state) => {
         const provider = snapshot.provider ? mapProvider(snapshot.provider) : undefined
         const providers = state.providers.length ? state.providers : provider ? [provider] : []
@@ -122,6 +135,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           draftModel: snapshot.active_model ?? deriveModel(resolvedProvider) ?? state.draftModel,
           draftBaseUrl: resolvedProvider?.baseUrl ?? state.draftBaseUrl,
           draftApiKey: '',
+          warnRatio: snapshot.warn_ratio ?? state.warnRatio,
+          forceRatio: snapshot.force_ratio ?? state.forceRatio,
+          draftWarnRatio: snapshot.warn_ratio ?? state.draftWarnRatio,
+          draftForceRatio: snapshot.force_ratio ?? state.draftForceRatio,
+          draftSummarizerModel: snapshot.summarizer_model ?? state.draftSummarizerModel,
           clearSecret: false,
         }
       })
@@ -144,6 +162,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setDraftModel(model) {
     set({ draftModel: model })
   },
+  setDraftWarnRatio(value) {
+    set({ draftWarnRatio: value })
+  },
+  setDraftForceRatio(value) {
+    set({ draftForceRatio: value })
+  },
+  setDraftSummarizerModel(value) {
+    set({ draftSummarizerModel: value })
+  },
   setDraftApiKey(value) {
     set({ draftApiKey: value, clearSecret: false })
   },
@@ -160,6 +187,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       set({ error: 'Select a provider before saving.' })
       return
     }
+    if (state.draftWarnRatio <= 0 || state.draftWarnRatio >= 1 || state.draftForceRatio <= 0 || state.draftForceRatio >= 1) {
+      set({ error: 'Thresholds must be between 0 and 1.' })
+      return
+    }
+    if (state.draftWarnRatio >= state.draftForceRatio) {
+      set({ error: 'Warning threshold must be lower than the rollover threshold.' })
+      return
+    }
     const trimmedKey = state.draftApiKey.trim()
     if (provider.requiresApiKey && !trimmedKey && !provider.hasCredentials) {
       set({ error: 'This provider requires an API key.' })
@@ -171,6 +206,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         provider_id: provider.id,
         model: state.draftModel ?? null,
         base_url: state.draftBaseUrl ? state.draftBaseUrl : null,
+        warn_ratio: state.draftWarnRatio,
+        force_ratio: state.draftForceRatio,
+        summarizer_model: state.draftSummarizerModel ?? null,
       }
       if (trimmedKey) {
         payload.api_key = trimmedKey
@@ -196,6 +234,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           activeProviderId: snapshot.active_provider_id ?? provider.id,
           activeModel: snapshot.active_model ?? state.draftModel,
           draftApiKey: '',
+          warnRatio: snapshot.warn_ratio,
+          forceRatio: snapshot.force_ratio,
+          draftWarnRatio: snapshot.warn_ratio,
+          draftForceRatio: snapshot.force_ratio,
+          draftSummarizerModel: snapshot.summarizer_model ?? state.draftSummarizerModel,
           clearSecret: false,
           statusMessage: 'Settings saved successfully.',
           saving: false,

@@ -7,11 +7,15 @@
 use std::sync::Arc;
 
 use crate::agents::config::{self, AiSettingsUpdate};
-use crate::agents::{AiChatInput, AiChatMessage, AiChatResponse, AiOrchestrator};
+use crate::agents::{AiChatInput, AiChatMessage, AiChatResponse};
 use crate::db::DbPool;
 use crate::logging::log_event;
-use crate::workers::{self, JobRunResult};
-use r2d2_sqlite::rusqlite::{Connection as SqliteConnection, OptionalExtension};
+use crate::model_manager::ModelManager;
+use crate::summarizer::{
+    AppendResult, ConversationRecord, MessageRecord, RolloverOutcome, Summarizer, SummaryRecord,
+};
+use crate::workers::{JobRunResult, JobScheduler};
+use r2d2_sqlite::rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{async_runtime::spawn_blocking, State};
@@ -24,7 +28,9 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct ApiState {
     pub db: DbPool,
-    pub ai: Arc<AiOrchestrator>,
+    pub model_manager: Arc<ModelManager>,
+    pub summarizer: Arc<Summarizer>,
+    pub scheduler: Arc<JobScheduler>,
 }
 
 /// Simple health-check endpoint for UI components.
@@ -61,6 +67,15 @@ pub struct CreateNoteInput {
 #[derive(Serialize)]
 pub struct CreateNoteOutput {
     pub id: String,
+}
+
+#[derive(Serialize)]
+pub struct AiSettingsView {
+    #[serde(flatten)]
+    pub snapshot: config::AiSettingsSnapshot,
+    pub warn_ratio: f32,
+    pub force_ratio: f32,
+    pub summarizer_model: Option<String>,
 }
 
 /// Persist a note and log the action for the activity feed.
@@ -155,8 +170,8 @@ pub fn list_logbook_entries(
     state: State<ApiState>,
     limit: Option<usize>,
 ) -> Result<Vec<LogbookEntry>, String> {
+    ensure_today_digest(&state)?;
     let conn = state.db.get().map_err(|e| e.to_string())?;
-    ensure_today_digest(&conn)?;
 
     let mut entries = Vec::new();
     if let Some(limit) = limit {
@@ -218,8 +233,8 @@ pub fn list_timeline_events(
     state: State<ApiState>,
     date: Option<String>,
 ) -> Result<Vec<TimelineEvent>, String> {
+    ensure_today_digest(&state)?;
     let conn = state.db.get().map_err(|e| e.to_string())?;
-    ensure_today_digest(&conn)?;
 
     let resolved_date = if let Some(value) = date {
         Date::parse(&value, &format_description!("[year]-[month]-[day]"))
@@ -320,31 +335,40 @@ fn map_ai_event(row: &r2d2_sqlite::rusqlite::Row) -> r2d2_sqlite::rusqlite::Resu
 
 /// Trigger the daily digest worker immediately.
 #[tauri::command]
-pub fn run_daily_digest(
-    state: State<ApiState>,
+pub async fn run_daily_digest(
+    state: State<'_, ApiState>,
     date: Option<String>,
 ) -> Result<JobRunResult, String> {
-    let conn = state.db.get().map_err(|e| e.to_string())?;
     let payload = if let Some(value) = date {
         json!({ "date": value })
     } else {
         json!({})
     };
-    workers::enqueue_job(&conn, "workspace.daily_digest", payload).map_err(|e| e.to_string())
+    state
+        .scheduler
+        .run_now("workspace.daily_digest", payload)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Ensure the daily digest job has been scheduled for the current day.
-fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
+fn ensure_today_digest(state: &State<ApiState>) -> Result<(), String> {
     let today = OffsetDateTime::now_utc().date().to_string();
-    let mut stmt = conn
-        .prepare("SELECT id FROM logbook_entries WHERE entry_date = ?1 LIMIT 1")
-        .map_err(|e| e.to_string())?;
-    let existing: Option<String> = stmt
-        .query_row([today.as_str()], |row| row.get(0))
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if existing.is_none() {
-        let _ = workers::enqueue_job(conn, "workspace.daily_digest", json!({}))
+    let missing = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM logbook_entries WHERE entry_date = ?1 LIMIT 1")
+            .map_err(|e| e.to_string())?;
+        let existing: Option<String> = stmt
+            .query_row([today.as_str()], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        existing.is_none()
+    };
+    if missing {
+        let _ = state
+            .scheduler
+            .run_now_blocking("workspace.daily_digest", json!({ "date": today }))
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -355,27 +379,31 @@ fn ensure_today_digest(conn: &SqliteConnection) -> Result<(), String> {
 pub async fn ai_list_providers(
     state: State<'_, ApiState>,
 ) -> Result<Vec<config::AiProviderInfo>, String> {
-    let pool = state.db.clone();
-    spawn_blocking(move || {
-        let conn = pool.get().map_err(|e| e.to_string())?;
-        config::list_providers(&conn).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    state
+        .model_manager
+        .list_providers()
+        .map_err(|e| e.to_string())
 }
 
 /// Fetch the current AI settings snapshot via a blocking thread pool.
 #[tauri::command]
-pub async fn ai_get_settings(
-    state: State<'_, ApiState>,
-) -> Result<config::AiSettingsSnapshot, String> {
+pub async fn ai_get_settings(state: State<'_, ApiState>) -> Result<AiSettingsView, String> {
     let pool = state.db.clone();
-    spawn_blocking(move || {
+    let snapshot = spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
         config::get_settings(&conn).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let summarizer_config = state.summarizer.load_config().map_err(|e| e.to_string())?;
+
+    Ok(AiSettingsView {
+        snapshot,
+        warn_ratio: summarizer_config.warn_ratio,
+        force_ratio: summarizer_config.force_ratio,
+        summarizer_model: summarizer_config.summarizer_model,
+    })
 }
 
 #[derive(Deserialize)]
@@ -384,6 +412,9 @@ pub struct AiUpdateSettingsInput {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub warn_ratio: Option<f32>,
+    pub force_ratio: Option<f32>,
+    pub summarizer_model: Option<String>,
 }
 
 /// Update AI provider settings from the UI.
@@ -391,17 +422,30 @@ pub struct AiUpdateSettingsInput {
 pub async fn ai_update_settings(
     state: State<'_, ApiState>,
     input: AiUpdateSettingsInput,
-) -> Result<config::AiSettingsSnapshot, String> {
+) -> Result<AiSettingsView, String> {
     let pool = state.db.clone();
-    spawn_blocking(move || {
+    let summarizer_config = state.summarizer.load_config().map_err(|e| e.to_string())?;
+    let warn_ratio = input.warn_ratio.unwrap_or(summarizer_config.warn_ratio);
+    let force_ratio = input.force_ratio.unwrap_or(summarizer_config.force_ratio);
+    let summarizer_model = input
+        .summarizer_model
+        .clone()
+        .or(summarizer_config.summarizer_model.clone());
+
+    let provider_id = input.provider_id.clone();
+    let model = input.model.clone();
+    let api_key = input.api_key.clone();
+    let base_url = input.base_url.clone();
+
+    let snapshot = spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
         let snapshot = config::update_settings(
             &conn,
             AiSettingsUpdate {
-                provider_id: input.provider_id,
-                model: input.model,
-                api_key: input.api_key,
-                base_url: input.base_url,
+                provider_id,
+                model,
+                api_key,
+                base_url,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -409,7 +453,19 @@ pub async fn ai_update_settings(
         Ok(snapshot)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let summarizer_state = state
+        .summarizer
+        .update_config(warn_ratio, force_ratio, summarizer_model)
+        .map_err(|e| e.to_string())?;
+
+    Ok(AiSettingsView {
+        snapshot,
+        warn_ratio: summarizer_state.warn_ratio,
+        force_ratio: summarizer_state.force_ratio,
+        summarizer_model: summarizer_state.summarizer_model,
+    })
 }
 
 #[derive(Deserialize)]
@@ -426,23 +482,55 @@ pub struct AiChatCommandInput {
     pub model: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ChatCreateConversationInput {
+    pub title: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ChatMessagesInput {
+    pub conversation_id: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct ChatAppendInput {
+    pub conversation_id: String,
+    pub content: String,
+    pub role: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AiRolloverInput {
+    pub conversation_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct AiSetModelInput {
+    pub conversation_id: String,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AiSummarizeInput {
+    pub target_type: String,
+    pub target_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct AiSummaryLookupInput {
+    pub summary_id: String,
+}
+
 /// Execute a chat completion via the orchestrator and record the result.
 #[tauri::command]
 pub async fn ai_chat(
     state: State<'_, ApiState>,
     input: AiChatCommandInput,
 ) -> Result<AiChatResponse, String> {
-    let pool = state.db.clone();
-    let provider_override = input.provider_id.clone();
-    let model_override = input.model.clone();
-
-    let selection = spawn_blocking(move || {
-        let conn = pool.get().map_err(|e| e.to_string())?;
-        config::resolve_runtime(&conn, provider_override, model_override).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
     let ai_input = AiChatInput {
         messages: input
             .messages
@@ -455,36 +543,148 @@ pub async fn ai_chat(
         temperature: input.temperature,
     };
 
-    let response = state
-        .ai
-        .chat(&selection, ai_input)
+    state
+        .model_manager
+        .chat(
+            ai_input,
+            input.provider_id.clone(),
+            input.model.clone(),
+            false,
+        )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
 
-    let log_pool = state.db.clone();
-    let provider_id = selection.provider.id.clone();
-    let model_name = selection.model.clone();
-    let preview = response.content.chars().take(160).collect::<String>();
+#[tauri::command]
+pub async fn ai_list_models(
+    state: State<'_, ApiState>,
+) -> Result<Vec<config::AiProviderInfo>, String> {
+    ai_list_providers(state).await
+}
 
-    let _ = spawn_blocking(move || {
-        if let Ok(conn) = log_pool.get() {
-            let _ = log_event(
-                &conn,
-                "info",
-                Some("AI-0100"),
-                "ai.runtime",
-                "AI chat invocation",
-                Some("Request completed"),
-                Some(serde_json::json!({
-                    "provider": provider_id,
-                    "model": model_name,
-                    "preview": preview,
-                })),
-            );
+#[tauri::command]
+pub async fn chat_create_conversation(
+    state: State<'_, ApiState>,
+    input: ChatCreateConversationInput,
+) -> Result<ConversationRecord, String> {
+    state
+        .summarizer
+        .create_conversation(input.title, input.provider_id, input.model_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn chat_list_conversations(
+    state: State<'_, ApiState>,
+    limit: Option<usize>,
+) -> Result<Vec<ConversationRecord>, String> {
+    state
+        .summarizer
+        .list_conversations(limit)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn chat_get_messages(
+    state: State<'_, ApiState>,
+    input: ChatMessagesInput,
+) -> Result<Vec<MessageRecord>, String> {
+    state
+        .summarizer
+        .list_messages(&input.conversation_id, input.limit)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn chat_append_and_maybe_rollover(
+    state: State<'_, ApiState>,
+    input: ChatAppendInput,
+) -> Result<AppendResult, String> {
+    let role = input.role.unwrap_or_else(|| "user".to_string());
+    state
+        .summarizer
+        .append_and_maybe_rollover(&input.conversation_id, &role, &input.content)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn ai_rollover_chat(
+    state: State<'_, ApiState>,
+    input: AiRolloverInput,
+) -> Result<RolloverOutcome, String> {
+    state
+        .summarizer
+        .rollover(&input.conversation_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn ai_set_model(
+    state: State<'_, ApiState>,
+    input: AiSetModelInput,
+) -> Result<ConversationRecord, String> {
+    state
+        .summarizer
+        .set_conversation_model(&input.conversation_id, input.provider_id, input.model_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn ai_summarize(
+    state: State<'_, ApiState>,
+    input: AiSummarizeInput,
+) -> Result<SummaryRecord, String> {
+    match input.target_type.as_str() {
+        "note" => {
+            let pool = state.db.clone();
+            let target_id = input.target_id.clone();
+            let (title, body): (String, String) = spawn_blocking(move || {
+                let conn = pool.get().map_err(|e| e.to_string())?;
+                conn.prepare("SELECT title, body FROM notes WHERE id = ?1")
+                    .map_err(|e| e.to_string())?
+                    .query_row([target_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let content = format!("# {title}\n\n{body}");
+            state
+                .summarizer
+                .summarise("note", &input.target_id, &content)
+                .map_err(|e| e.to_string())
         }
-        Ok::<(), ()>(())
-    })
-    .await;
+        "conversation" => state
+            .summarizer
+            .summarise_conversation(&input.target_id)
+            .map_err(|e| e.to_string()),
+        "day" => {
+            let pool = state.db.clone();
+            let target_id = input.target_id.clone();
+            let summary_text: String = spawn_blocking(move || {
+                let conn = pool.get().map_err(|e| e.to_string())?;
+                conn.prepare("SELECT summary FROM logbook_entries WHERE entry_date = ?1")
+                    .map_err(|e| e.to_string())?
+                    .query_row([target_id.as_str()], |row| row.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            state
+                .summarizer
+                .summarise("day", &input.target_id, &summary_text)
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!("Unsupported summary target: {other}")),
+    }
+}
 
-    Ok(response)
+#[tauri::command]
+pub async fn ai_get_summary(
+    state: State<'_, ApiState>,
+    input: AiSummaryLookupInput,
+) -> Result<Option<SummaryRecord>, String> {
+    state
+        .summarizer
+        .fetch_summary(&input.summary_id)
+        .map_err(|e| e.to_string())
 }

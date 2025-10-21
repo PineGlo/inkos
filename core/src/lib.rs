@@ -14,4 +14,6 @@ pub mod api;
 pub mod db;
 pub mod errors;
 pub mod logging;
+pub mod model_manager;
+pub mod summarizer;
 pub mod workers;

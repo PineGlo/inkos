@@ -56,6 +56,13 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
                 "/../migrations/0003_logbook_timeline.sql"
             )),
         ),
+        (
+            "0004_conversations_summaries.sql",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../migrations/0004_conversations_summaries.sql"
+            )),
+        ),
     ];
 
     for (name, sql) in migrations {

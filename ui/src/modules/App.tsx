@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import Chat from './Chat'
 import Settings from './Settings'
 import Timeline from './Timeline'
 import Palette, { type PaletteCommand } from '../components/Palette'
@@ -104,7 +105,7 @@ function NotesPanel({ onNotify }: { onNotify?: (message: string, kind?: 'info' |
   )
 }
 
-type TabKey = 'notes' | 'timeline' | 'settings'
+type TabKey = 'notes' | 'chat' | 'timeline' | 'settings'
 
 type Notice = { text: string; kind: 'info' | 'error' }
 
@@ -178,6 +179,13 @@ export default function App() {
         },
       },
       {
+        id: 'command.open-chat',
+        title: 'Open chat assistant',
+        description: 'Talk with the assistant and manage conversation rollovers.',
+        keywords: ['chat', 'assistant', 'rollover'],
+        action: () => setTab('chat'),
+      },
+      {
         id: 'command.open-timeline',
         title: 'Open timeline & logbook',
         description: 'Jump directly to the automated daily chronicle.',
@@ -229,6 +237,7 @@ export default function App() {
         </div>
         <nav style={{ display: 'grid', gap: 8 }}>
           <NavButton label="Notes" active={tab === 'notes'} onClick={() => setTab('notes')} />
+          <NavButton label="Chat" active={tab === 'chat'} onClick={() => setTab('chat')} />
           <NavButton label="Timeline" active={tab === 'timeline'} onClick={() => setTab('timeline')} />
           <NavButton label="AI Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
@@ -283,6 +292,7 @@ export default function App() {
         )}
         <div style={{ flex: 1, overflow: 'auto' }}>
           {tab === 'notes' && <NotesPanel onNotify={notify} />}
+          {tab === 'chat' && <Chat onNotify={notify} />}
           {tab === 'timeline' && <Timeline refreshKey={timelineRefreshKey} onNotify={notify} />}
           {tab === 'settings' && <Settings />}
         </div>
