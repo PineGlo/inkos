@@ -1,15 +1,35 @@
+//! Background job execution and helpers for deriving daily workspace digests.
+//!
+//! Jobs are persisted to the SQLite `jobs` table so that they can be retried
+//! and inspected by diagnostic tooling. A lightweight async scheduler polls the
+//! queue, executes due jobs on blocking threads, and records structured output
+//! for the UI.
+
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
 use anyhow::{anyhow, Context, Result};
+use log::error;
 use r2d2_sqlite::rusqlite::Connection;
 use r2d2_sqlite::rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
+use tauri::async_runtime;
 use time::macros::format_description;
-use time::{Date, Duration, OffsetDateTime, Time};
+use time::{Date, Duration as TimeDuration, OffsetDateTime, Time};
+use tokio::sync::Notify;
+use tokio::task::spawn_blocking;
+use tokio::time::interval;
 use uuid::Uuid;
 
+use crate::db::DbPool;
 use crate::logging::log_event;
+use crate::summarizer::{Summarizer, SummaryRecord};
 
-#[derive(Debug, Serialize)]
+const DAILY_DIGEST_JOB: &str = "workspace.daily_digest";
+
+/// Result payload returned when a worker completes a job.
+#[derive(Debug, Clone, Serialize)]
 pub struct JobRunResult {
     pub job_id: String,
     pub kind: String,
@@ -17,21 +37,194 @@ pub struct JobRunResult {
     pub result: Value,
 }
 
-const DAILY_DIGEST_JOB: &str = "workspace.daily_digest";
+struct PendingJob {
+    id: String,
+    kind: String,
+    payload: Value,
+}
 
-pub fn enqueue_job(conn: &Connection, kind: &str, payload: Value) -> Result<JobRunResult> {
+/// Cooperative scheduler that executes queued jobs on background threads.
+pub struct JobScheduler {
+    pool: DbPool,
+    summarizer: Arc<Summarizer>,
+    notifier: Arc<Notify>,
+}
+
+impl JobScheduler {
+    /// Construct a scheduler backed by the provided database pool and AI runtime.
+    pub fn new(pool: DbPool, summarizer: Arc<Summarizer>) -> Arc<Self> {
+        let scheduler = Arc::new(Self {
+            pool,
+            summarizer,
+            notifier: Arc::new(Notify::new()),
+        });
+        scheduler.spawn_worker();
+        scheduler
+    }
+
+    fn spawn_worker(self: &Arc<Self>) {
+        let runner = Arc::clone(self);
+        async_runtime::spawn(async move {
+            let mut tick = interval(StdDuration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = runner.notifier.notified() => {
+                        if let Err(err) = runner.dispatch_due_jobs().await {
+                            error!("failed to dispatch queued jobs: {err:?}");
+                        }
+                    }
+                    _ = tick.tick() => {
+                        if let Err(err) = runner.dispatch_due_jobs().await {
+                            error!("failed to dispatch queued jobs: {err:?}");
+                        }
+                        if let Err(err) = runner.ensure_nightly_digest_schedule().await {
+                            error!("failed to ensure nightly digest schedule: {err:?}");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn wake(&self) {
+        self.notifier.notify_one();
+    }
+
+    /// Persist a job and execute it immediately on a worker thread.
+    pub async fn run_now(&self, kind: &str, payload: Value) -> Result<JobRunResult> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let job_id = self.persist_job(kind, &payload, Some(now)).await?;
+        let result = self
+            .run_existing_job(PendingJob {
+                id: job_id.clone(),
+                kind: kind.to_string(),
+                payload,
+            })
+            .await?;
+        let _ = self.ensure_nightly_digest_schedule().await;
+        Ok(result)
+    }
+
+    /// Blocking helper used by synchronous IPC handlers.
+    pub fn run_now_blocking(&self, kind: &str, payload: Value) -> Result<JobRunResult> {
+        async_runtime::block_on(self.run_now(kind, payload))
+    }
+
+    /// Queue a job for execution at a specific unix timestamp.
+    pub async fn enqueue_at(&self, kind: &str, payload: Value, run_at: i64) -> Result<String> {
+        let id = self.persist_job(kind, &payload, Some(run_at)).await?;
+        self.wake();
+        Ok(id)
+    }
+
+    /// Blocking variant of [`enqueue_at`].
+    pub fn enqueue_at_blocking(&self, kind: &str, payload: Value, run_at: i64) -> Result<String> {
+        async_runtime::block_on(self.enqueue_at(kind, payload, run_at))
+    }
+
+    /// Ensure a nightly digest job exists for the upcoming 02:00 UTC run.
+    pub async fn ensure_nightly_digest_schedule(&self) -> Result<()> {
+        let pool = self.pool.clone();
+        spawn_blocking(move || {
+            let conn = pool.get()?;
+            schedule_next_digest(&conn)
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// Blocking convenience wrapper for [`ensure_nightly_digest_schedule`].
+    pub fn ensure_nightly_digest_schedule_blocking(&self) -> Result<()> {
+        async_runtime::block_on(self.ensure_nightly_digest_schedule())
+    }
+
+    async fn dispatch_due_jobs(self: &Arc<Self>) -> Result<()> {
+        let jobs = self.fetch_due_jobs().await?;
+        for job in jobs {
+            if let Err(err) = self.run_existing_job(job).await {
+                error!("job execution failed: {err:?}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn fetch_due_jobs(&self) -> Result<Vec<PendingJob>> {
+        let pool = self.pool.clone();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, kind, payload FROM jobs WHERE state='queued' AND (run_at IS NULL OR run_at <= ?1) ORDER BY run_at IS NULL DESC, run_at ASC, created_at ASC",
+            )?;
+            let rows = stmt.query_map([now], |row| {
+                let payload_json: String = row.get(2)?;
+                let payload = serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({}));
+                Ok(PendingJob {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    payload,
+                })
+            })?;
+            let mut pending = Vec::new();
+            for row in rows {
+                pending.push(row?);
+            }
+            Ok(pending)
+        })
+        .await??
+    }
+
+    async fn run_existing_job(&self, job: PendingJob) -> Result<JobRunResult> {
+        let pool = self.pool.clone();
+        let summarizer = Arc::clone(&self.summarizer);
+        spawn_blocking(move || {
+            let conn = pool.get()?;
+            run_job(&conn, summarizer.as_ref(), &job.id, &job.kind, job.payload)
+        })
+        .await??
+    }
+
+    async fn persist_job(
+        &self,
+        kind: &str,
+        payload: &Value,
+        run_at: Option<i64>,
+    ) -> Result<String> {
+        let pool = self.pool.clone();
+        let kind = kind.to_string();
+        let payload = payload.clone();
+        spawn_blocking(move || {
+            let conn = pool.get()?;
+            persist_job_with_conn(&conn, &kind, &payload, run_at)
+        })
+        .await??
+    }
+}
+
+fn persist_job_with_conn(
+    conn: &Connection,
+    kind: &str,
+    payload: &Value,
+    run_at: Option<i64>,
+) -> Result<String> {
     let id = Uuid::new_v4().to_string();
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(
-        "INSERT INTO jobs (id, kind, state, payload, created_at, updated_at) VALUES (?1, ?2, 'queued', ?3, ?4, ?5)",
-        (id.as_str(), kind, payload.to_string(), now, now),
+        "INSERT INTO jobs (id, kind, state, payload, created_at, updated_at, run_at) VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6)",
+        params![id.as_str(), kind, payload.to_string(), now, now, run_at],
     )
     .with_context(|| format!("failed to enqueue job {kind}"))?;
-
-    run_job(conn, &id, kind, payload)
+    Ok(id)
 }
 
-fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<JobRunResult> {
+/// Run a job and update its persisted state transitions.
+fn run_job(
+    conn: &Connection,
+    summarizer: &Summarizer,
+    id: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<JobRunResult> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     conn.execute(
         "UPDATE jobs SET state='running', updated_at=?2 WHERE id=?1",
@@ -40,7 +233,7 @@ fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<Jo
     .with_context(|| format!("failed to update job {kind} to running"))?;
 
     let result = match kind {
-        DAILY_DIGEST_JOB => perform_daily_digest(conn, &payload),
+        DAILY_DIGEST_JOB => perform_daily_digest(conn, summarizer, &payload),
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -72,7 +265,12 @@ fn run_job(conn: &Connection, id: &str, kind: &str, payload: Value) -> Result<Jo
     }
 }
 
-fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
+/// Generate the logbook summary and timeline entries for a given day.
+fn perform_daily_digest(
+    conn: &Connection,
+    summarizer: &Summarizer,
+    payload: &Value,
+) -> Result<Value> {
     let date = resolve_entry_date(payload)?;
     let date_key = date.to_string();
     let start_ts = date
@@ -80,7 +278,8 @@ fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
         .context("failed to derive midnight for date")?
         .assume_utc()
         .unix_timestamp();
-    let end_ts = (OffsetDateTime::from_unix_timestamp(start_ts)? + Duration::DAY).unix_timestamp();
+    let end_ts =
+        (OffsetDateTime::from_unix_timestamp(start_ts)? + TimeDuration::DAY).unix_timestamp();
 
     let notes_count: i64 = conn
         .query_row(
@@ -123,6 +322,8 @@ fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
         )
         .context("failed to count job executions")?;
 
+    let note_excerpts = collect_note_excerpts(conn, start_ts, end_ts)?;
+
     let mut summary_parts = Vec::new();
     summary_parts.push(format!(
         "Captured {notes_count} note{} today.",
@@ -139,23 +340,42 @@ fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
         plural(job_count)
     ));
 
-    if let Some((title, ts)) = latest_note {
-        let when = OffsetDateTime::from_unix_timestamp(ts)?
+    if let Some((title, ts)) = &latest_note {
+        let when = OffsetDateTime::from_unix_timestamp(*ts)?
             .format(&format_description!("[hour]:[minute] UTC"))?;
         summary_parts.push(format!("Latest note \"{}\" captured at {}.", title, when));
     }
 
-    let summary = summary_parts.join(" ");
+    let fallback_summary = summary_parts.join(" ");
 
-    let logbook_entry = upsert_logbook_entry(conn, &date_key, &summary)?;
+    let facts = DailyDigestFacts {
+        date_key: date_key.clone(),
+        notes_count,
+        ai_calls,
+        ai_failures,
+        job_count,
+        latest_note: latest_note.clone(),
+        note_excerpts,
+    };
+
+    let facts_json = digest_facts_json(&facts);
+    let summary_record =
+        summarizer.summarise_daily_digest(&date_key, facts_json, &fallback_summary)?;
+    let summary_text = summary_record.body.clone();
+
+    let logbook_entry = upsert_logbook_entry(conn, &date_key, &summary_record)?;
     let timeline = rebuild_timeline(
         conn,
         &date_key,
-        &summary,
+        &summary_text,
         notes_count,
         ai_calls,
         ai_failures,
     )?;
+
+    if let Some(entry_id) = logbook_entry.get("id").and_then(|v| v.as_str()) {
+        link_note_mentions(conn, entry_id, &facts.note_excerpts)?;
+    }
 
     log_event(
         conn,
@@ -164,18 +384,133 @@ fn perform_daily_digest(conn: &Connection, payload: &Value) -> Result<Value> {
         "jobs.daily",
         "Daily digest job completed",
         Some("Created or refreshed logbook and timeline entries."),
-        Some(json!({ "entry_date": date_key })),
+        Some(json!({
+            "entry_date": date_key,
+            "summary_id": summary_record.id,
+        })),
     )
     .context("failed to log daily digest completion")?;
 
     Ok(json!({
-        "entry_date": date_key,
+        "entry_date": date.to_string(),
         "logbook": logbook_entry,
         "timeline": timeline,
     }))
 }
 
-fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> Result<Value> {
+struct DailyDigestFacts {
+    date_key: String,
+    notes_count: i64,
+    ai_calls: i64,
+    ai_failures: i64,
+    job_count: i64,
+    latest_note: Option<(String, i64)>,
+    note_excerpts: Vec<NoteExcerpt>,
+}
+
+fn digest_facts_json(facts: &DailyDigestFacts) -> Value {
+    json!({
+        "date_key": facts.date_key,
+        "notes_count": facts.notes_count,
+        "ai_calls": facts.ai_calls,
+        "ai_failures": facts.ai_failures,
+        "job_count": facts.job_count,
+        "latest_note": facts.latest_note.as_ref().map(|(title, ts)| json!({
+            "title": title,
+            "created_at": ts,
+        })),
+        "note_excerpts": facts
+            .note_excerpts
+            .iter()
+            .map(|note| json!({
+                "id": note.id,
+                "title": note.title,
+                "preview": note.preview,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+struct NoteExcerpt {
+    id: String,
+    title: String,
+    preview: String,
+}
+
+fn collect_note_excerpts(
+    conn: &Connection,
+    start_ts: i64,
+    end_ts: i64,
+) -> Result<Vec<NoteExcerpt>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, body FROM notes WHERE created_at >= ?1 AND created_at < ?2 ORDER BY created_at DESC LIMIT 5",
+    )?;
+    let rows = stmt.query_map(params![start_ts, end_ts], |row| {
+        let body: String = row.get(2)?;
+        let preview: String = body.chars().take(240).collect();
+        Ok(NoteExcerpt {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            preview: preview.replace('\n', " "),
+        })
+    })?;
+    let mut excerpts = Vec::new();
+    for row in rows {
+        excerpts.push(row?);
+    }
+    Ok(excerpts)
+}
+
+fn schedule_next_digest(conn: &Connection) -> Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let target_time =
+        Time::from_hms(2, 0, 0).context("failed to construct digest schedule time")?;
+    let mut next_run = now
+        .date()
+        .with_time(target_time)
+        .context("failed to derive next digest timestamp")?
+        .assume_utc();
+    if now >= next_run {
+        next_run += TimeDuration::DAY;
+    }
+    let digest_date = (next_run - TimeDuration::DAY).date().to_string();
+    let run_at_ts = next_run.unix_timestamp();
+
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM jobs WHERE kind = ?1 AND state = 'queued' AND run_at = ?2 LIMIT 1",
+            params![DAILY_DIGEST_JOB, run_at_ts],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let payload = json!({ "date": digest_date });
+    let id = persist_job_with_conn(conn, DAILY_DIGEST_JOB, &payload, Some(run_at_ts))?;
+    let _ = log_event(
+        conn,
+        "info",
+        Some("JOB-200"),
+        "jobs.scheduler",
+        "Scheduled nightly digest job",
+        Some("Will summarise the previous day at 02:00 UTC."),
+        Some(json!({
+            "job_id": id,
+            "run_at": run_at_ts,
+            "payload": payload,
+        })),
+    );
+    Ok(())
+}
+
+/// Insert or update the daily logbook entry for `entry_date`.
+fn upsert_logbook_entry(
+    conn: &Connection,
+    entry_date: &str,
+    summary: &SummaryRecord,
+) -> Result<Value> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let existing: Option<(String, i64)> = conn
         .prepare("SELECT id, created_at FROM logbook_entries WHERE entry_date = ?1")?
@@ -185,7 +520,7 @@ fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> R
     let entry_id = if let Some((id, _)) = existing {
         conn.execute(
             "UPDATE logbook_entries SET summary = ?2 WHERE id = ?1",
-            params![id, summary],
+            params![id, summary.body],
         )
         .context("failed to update existing logbook entry")?;
         id
@@ -193,11 +528,13 @@ fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> R
         let id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO logbook_entries (id, entry_date, summary, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![id, entry_date, summary, now],
+            params![id, entry_date, summary.body, now],
         )
         .context("failed to insert logbook entry")?;
         id
     };
+
+    link_summary(conn, &entry_id, summary)?;
 
     let (created_at,): (i64,) = conn
         .query_row(
@@ -210,11 +547,71 @@ fn upsert_logbook_entry(conn: &Connection, entry_date: &str, summary: &str) -> R
     Ok(json!({
         "id": entry_id,
         "entry_date": entry_date,
-        "summary": summary,
+        "summary": summary.body,
         "created_at": created_at,
     }))
 }
 
+fn link_summary(conn: &Connection, entry_id: &str, summary: &SummaryRecord) -> Result<()> {
+    replace_link(
+        conn,
+        entry_id,
+        "logbook_entry",
+        &summary.id,
+        "summary",
+        "has_summary",
+    )?;
+    replace_link(
+        conn,
+        &summary.id,
+        "summary",
+        entry_id,
+        "logbook_entry",
+        "describes",
+    )?;
+    Ok(())
+}
+
+fn link_note_mentions(conn: &Connection, entry_id: &str, notes: &[NoteExcerpt]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM links WHERE src_id = ?1 AND src_type = 'logbook_entry' AND rel = 'mentions'",
+        params![entry_id],
+    )?;
+    for note in notes {
+        replace_link(
+            conn,
+            entry_id,
+            "logbook_entry",
+            &note.id,
+            "note",
+            "mentions",
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_link(
+    conn: &Connection,
+    src_id: &str,
+    src_type: &str,
+    dst_id: &str,
+    dst_type: &str,
+    rel: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM links WHERE src_id = ?1 AND src_type = ?2 AND dst_id = ?3 AND dst_type = ?4 AND rel = ?5",
+        params![src_id, src_type, dst_id, dst_type, rel],
+    )?;
+    let id = Uuid::new_v4().to_string();
+    let created_at = OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO links (id, src_id, src_type, dst_id, dst_type, rel, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, src_id, src_type, dst_id, dst_type, rel, created_at],
+    )?;
+    Ok(())
+}
+
+/// Recreate the derived timeline events backing the daily digest view.
 fn rebuild_timeline(
     conn: &Connection,
     entry_date: &str,
@@ -277,6 +674,7 @@ fn rebuild_timeline(
     Ok(Value::Array(events))
 }
 
+/// Persist a single timeline event and return its serialised form.
 fn create_timeline_event(
     conn: &Connection,
     entry_date: &str,
@@ -304,6 +702,7 @@ fn create_timeline_event(
     }))
 }
 
+/// Resolve the target date for a digest run, defaulting to today.
 fn resolve_entry_date(payload: &Value) -> Result<Date> {
     if let Some(date_str) = payload.get("date").and_then(Value::as_str) {
         Date::parse(date_str, &format_description!("[year]-[month]-[day]"))
@@ -313,6 +712,7 @@ fn resolve_entry_date(payload: &Value) -> Result<Date> {
     }
 }
 
+/// Helper for English pluralisation of counts.
 fn plural(count: i64) -> &'static str {
     if count == 1 {
         ""

@@ -1,8 +1,18 @@
+//! Lightweight helpers for writing structured diagnostics into the
+//! `event_log` table. The log stream powers the AI debugger UI and the
+//! daily digest worker, so keeping the API small and predictable is useful.
+
 use r2d2_sqlite::rusqlite::{params, Connection};
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// Insert a structured event into the `event_log` table.
+///
+/// The function accepts optional metadata so that callers can provide
+/// machine-readable error codes alongside human-readable explanations.
+/// `data` is stored as raw JSON to keep the schema flexible while still
+/// allowing downstream analysis.
 pub fn log_event(
     conn: &Connection,
     level: &str,

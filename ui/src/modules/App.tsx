@@ -1,12 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import Chat from './Chat'
 import Settings from './Settings'
 import Timeline from './Timeline'
 import Palette, { type PaletteCommand } from '../components/Palette'
 import Console from '../components/Console'
 import { ping, createNote, listNotes, runDailyDigest } from '../lib/api'
 
+/**
+ * Minimal note object used within the demo sandbox list. The canonical schema
+ * lives in the Rust layer but the UI keeps this lightweight for ergonomics.
+ */
 type Note = { id: string; title: string; created_at: number }
 
+/**
+ * Notes sandbox demonstrating synchronous IPC calls (ping + note creation).
+ * Notifications bubble up to the root layout so they can be surfaced globally.
+ */
 function NotesPanel({ onNotify }: { onNotify?: (message: string, kind?: 'info' | 'error') => void }) {
   const [status, setStatus] = useState('Checking core...')
   const [title, setTitle] = useState('Hello InkOS (v2)')
@@ -96,10 +105,14 @@ function NotesPanel({ onNotify }: { onNotify?: (message: string, kind?: 'info' |
   )
 }
 
-type TabKey = 'notes' | 'timeline' | 'settings'
+type TabKey = 'notes' | 'chat' | 'timeline' | 'settings'
 
 type Notice = { text: string; kind: 'info' | 'error' }
 
+/**
+ * Root InkOS shell component containing the sidebar navigation, command
+ * palette, AI console, and routed module panels.
+ */
 export default function App() {
   const [tab, setTab] = useState<TabKey>('notes')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -166,6 +179,13 @@ export default function App() {
         },
       },
       {
+        id: 'command.open-chat',
+        title: 'Open chat assistant',
+        description: 'Talk with the assistant and manage conversation rollovers.',
+        keywords: ['chat', 'assistant', 'rollover'],
+        action: () => setTab('chat'),
+      },
+      {
         id: 'command.open-timeline',
         title: 'Open timeline & logbook',
         description: 'Jump directly to the automated daily chronicle.',
@@ -217,6 +237,7 @@ export default function App() {
         </div>
         <nav style={{ display: 'grid', gap: 8 }}>
           <NavButton label="Notes" active={tab === 'notes'} onClick={() => setTab('notes')} />
+          <NavButton label="Chat" active={tab === 'chat'} onClick={() => setTab('chat')} />
           <NavButton label="Timeline" active={tab === 'timeline'} onClick={() => setTab('timeline')} />
           <NavButton label="AI Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
@@ -271,6 +292,7 @@ export default function App() {
         )}
         <div style={{ flex: 1, overflow: 'auto' }}>
           {tab === 'notes' && <NotesPanel onNotify={notify} />}
+          {tab === 'chat' && <Chat onNotify={notify} />}
           {tab === 'timeline' && <Timeline refreshKey={timelineRefreshKey} onNotify={notify} />}
           {tab === 'settings' && <Settings />}
         </div>
@@ -281,6 +303,7 @@ export default function App() {
   )
 }
 
+/** Presentational sidebar navigation button. */
 function NavButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button

@@ -1,5 +1,8 @@
+//! Static catalogue of AI provider defaults bundled with the app.
+
 use serde::{Deserialize, Serialize};
 
+/// Describes a baked-in provider configuration that can seed the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSeed {
     pub id: &'static str,
@@ -13,6 +16,7 @@ pub struct ProviderSeed {
     pub requires_api_key: bool,
 }
 
+/// Providers the runtime knows about out of the box.
 pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
     ProviderSeed {
         id: "openai",
@@ -22,7 +26,7 @@ pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
         base_url: Some("https://api.openai.com"),
         default_model: "gpt-4o-mini",
         models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-3.5-turbo"],
-        tags: &["chat", "multimodal", "tools"],
+        tags: &["chat", "multimodal", "tools", "ctx-128k"],
         requires_api_key: true,
     },
     ProviderSeed {
@@ -33,7 +37,7 @@ pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
         base_url: Some("https://api.anthropic.com"),
         default_model: "claude-3-opus-20240229",
         models: &["claude-3-opus-20240229", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
-        tags: &["chat", "analysis", "long-context"],
+        tags: &["chat", "analysis", "long-context", "ctx-200k"],
         requires_api_key: true,
     },
     ProviderSeed {
@@ -44,7 +48,7 @@ pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
         base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
         default_model: "models/gemini-2.0-flash",
         models: &["models/gemini-2.0-flash", "models/gemini-1.5-pro", "models/gemini-1.5-flash"],
-        tags: &["chat", "multimodal"],
+        tags: &["chat", "multimodal", "ctx-120k"],
         requires_api_key: true,
     },
     ProviderSeed {
@@ -55,7 +59,7 @@ pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
         base_url: Some("http://127.0.0.1:11434"),
         default_model: "llama3.1",
         models: &["llama3.1", "mistral", "codellama", "phi3"],
-        tags: &["chat", "local"],
+        tags: &["chat", "local", "ctx-8k"],
         requires_api_key: false,
     },
     ProviderSeed {
@@ -66,7 +70,7 @@ pub const PROVIDER_SEEDS: &[ProviderSeed] = &[
         base_url: Some("http://127.0.0.1:1234/v1"),
         default_model: "lmstudio-community/llama-3-8b-instruct",
         models: &["lmstudio-community/llama-3-8b-instruct", "lmstudio-community/qwen2-7b-instruct"],
-        tags: &["chat", "local", "openai-compatible"],
+        tags: &["chat", "local", "openai-compatible", "ctx-8k"],
         requires_api_key: false,
     },
 ];
