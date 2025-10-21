@@ -151,7 +151,7 @@ impl JobScheduler {
     async fn fetch_due_jobs(&self) -> Result<Vec<PendingJob>> {
         let pool = self.pool.clone();
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
                 "SELECT id, kind, payload FROM jobs WHERE state='queued' AND (run_at IS NULL OR run_at <= ?1) ORDER BY run_at IS NULL DESC, run_at ASC, created_at ASC",
@@ -171,17 +171,17 @@ impl JobScheduler {
             }
             Ok(pending)
         })
-        .await??
+        .await??)
     }
 
     async fn run_existing_job(&self, job: PendingJob) -> Result<JobRunResult> {
         let pool = self.pool.clone();
         let summarizer = Arc::clone(&self.summarizer);
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             let conn = pool.get()?;
             run_job(&conn, summarizer.as_ref(), &job.id, &job.kind, job.payload)
         })
-        .await??
+        .await??)
     }
 
     async fn persist_job(
@@ -193,11 +193,11 @@ impl JobScheduler {
         let pool = self.pool.clone();
         let kind = kind.to_string();
         let payload = payload.clone();
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             let conn = pool.get()?;
             persist_job_with_conn(&conn, &kind, &payload, run_at)
         })
-        .await??
+        .await??)
     }
 }
 
@@ -273,11 +273,7 @@ fn perform_daily_digest(
 ) -> Result<Value> {
     let date = resolve_entry_date(payload)?;
     let date_key = date.to_string();
-    let start_ts = date
-        .with_time(Time::MIDNIGHT)
-        .context("failed to derive midnight for date")?
-        .assume_utc()
-        .unix_timestamp();
+    let start_ts = date.with_time(Time::MIDNIGHT).assume_utc().unix_timestamp();
     let end_ts =
         (OffsetDateTime::from_unix_timestamp(start_ts)? + TimeDuration::DAY).unix_timestamp();
 
@@ -332,7 +328,6 @@ fn perform_daily_digest(
     summary_parts.push(format!(
         "Dispatched {ai_calls} AI run{} with {ai_failures} incident{}.",
         plural(ai_calls),
-        ai_failures,
         plural(ai_failures)
     ));
     summary_parts.push(format!(
@@ -465,11 +460,7 @@ fn schedule_next_digest(conn: &Connection) -> Result<()> {
     let now = OffsetDateTime::now_utc();
     let target_time =
         Time::from_hms(2, 0, 0).context("failed to construct digest schedule time")?;
-    let mut next_run = now
-        .date()
-        .with_time(target_time)
-        .context("failed to derive next digest timestamp")?
-        .assume_utc();
+    let mut next_run = now.date().with_time(target_time).assume_utc();
     if now >= next_run {
         next_run += TimeDuration::DAY;
     }

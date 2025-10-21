@@ -37,12 +37,8 @@ impl ModelManager {
 
     /// Enumerate providers cached in SQLite.
     pub fn list_providers(&self) -> Result<Vec<AiProviderInfo>> {
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            config::list_providers(&conn)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        config::list_providers(&conn)
     }
 
     /// Resolve the runtime selection that should be used for a call.
@@ -52,12 +48,8 @@ impl ModelManager {
         model_override: Option<String>,
         prefer_local: bool,
     ) -> Result<AiRuntimeSelection> {
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            resolve_with_fallback(&conn, provider_override, model_override, prefer_local)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        resolve_with_fallback(&conn, provider_override, model_override, prefer_local)
     }
 
     /// Execute a chat completion asynchronously, optionally overriding the

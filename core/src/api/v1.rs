@@ -394,7 +394,7 @@ pub async fn ai_get_settings(state: State<'_, ApiState>) -> Result<AiSettingsVie
         config::get_settings(&conn).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
 
     let summarizer_config = state.summarizer.load_config().map_err(|e| e.to_string())?;
 
@@ -453,7 +453,7 @@ pub async fn ai_update_settings(
         Ok(snapshot)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
 
     let summarizer_state = state
         .summarizer
@@ -640,10 +640,13 @@ pub async fn ai_summarize(
             let target_id = input.target_id.clone();
             let (title, body): (String, String) = spawn_blocking(move || {
                 let conn = pool.get().map_err(|e| e.to_string())?;
-                conn.prepare("SELECT title, body FROM notes WHERE id = ?1")
-                    .map_err(|e| e.to_string())?
+                let mut stmt = conn
+                    .prepare("SELECT title, body FROM notes WHERE id = ?1")
+                    .map_err(|e| e.to_string())?;
+                let result = stmt
                     .query_row([target_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                Ok(result)
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -662,10 +665,13 @@ pub async fn ai_summarize(
             let target_id = input.target_id.clone();
             let summary_text: String = spawn_blocking(move || {
                 let conn = pool.get().map_err(|e| e.to_string())?;
-                conn.prepare("SELECT summary FROM logbook_entries WHERE entry_date = ?1")
-                    .map_err(|e| e.to_string())?
+                let mut stmt = conn
+                    .prepare("SELECT summary FROM logbook_entries WHERE entry_date = ?1")
+                    .map_err(|e| e.to_string())?;
+                let result = stmt
                     .query_row([target_id.as_str()], |row| row.get(0))
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                Ok(result)
             })
             .await
             .map_err(|e| e.to_string())??;

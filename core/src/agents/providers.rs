@@ -1,9 +1,9 @@
 //! Static catalogue of AI provider defaults bundled with the app.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Describes a baked-in provider configuration that can seed the database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderSeed {
     pub id: &'static str,
     pub kind: &'static str,

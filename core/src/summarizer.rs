@@ -14,7 +14,6 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use tokio::task::spawn_blocking;
 use uuid::Uuid;
 
 use crate::agents::{AiChatInput, AiChatMessage};
@@ -113,12 +112,8 @@ impl Summarizer {
 
     /// Read the persisted configuration from `app_settings`.
     pub fn load_config(&self) -> Result<SummarizerConfig> {
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            read_config(&conn)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        read_config(&conn)
     }
 
     /// Persist updated thresholds and optional summariser model override.
@@ -128,13 +123,9 @@ impl Summarizer {
         force_ratio: f32,
         summarizer_model: Option<String>,
     ) -> Result<SummarizerConfig> {
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            write_config(&conn, warn_ratio, force_ratio, summarizer_model)?;
-            read_config(&conn)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        write_config(&conn, warn_ratio, force_ratio, summarizer_model)?;
+        read_config(&conn)
     }
 
     /// Create a conversation seeded with the current active provider/model.
@@ -144,37 +135,30 @@ impl Summarizer {
         provider_override: Option<String>,
         model_override: Option<String>,
     ) -> Result<ConversationRecord> {
-        let models = Arc::clone(&self.models);
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            let selection = models
-                .resolve_runtime(provider_override, model_override, true)?;
-            let now = OffsetDateTime::now_utc().unix_timestamp();
-            let id = Uuid::new_v4().to_string();
-            conn.execute(
-                "INSERT INTO conversations (id, title, provider_id, model_id, ctx_warn, ctx_force, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?5)",
-                params![
-                    id,
-                    title,
-                    selection.provider.id,
-                    selection.model,
-                    now,
-                ],
-            )?;
-            Ok(fetch_conversation(&conn, &id)?.ok_or_else(|| anyhow!("conversation missing after creation"))?)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let selection = self
+            .models
+            .resolve_runtime(provider_override, model_override, true)?;
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO conversations (id, title, provider_id, model_id, ctx_warn, ctx_force, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?5)",
+            params![
+                id,
+                title,
+                selection.provider.id,
+                selection.model,
+                now,
+            ],
+        )?;
+        fetch_conversation(&conn, &id)?
+            .ok_or_else(|| anyhow!("conversation missing after creation"))
     }
 
     /// Return conversations ordered by most recent activity.
     pub fn list_conversations(&self, limit: Option<usize>) -> Result<Vec<ConversationRecord>> {
-        let pool = self.pool.clone();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            list_conversations(&conn, limit)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        list_conversations(&conn, limit)
     }
 
     /// Fetch messages for a conversation.
@@ -183,24 +167,14 @@ impl Summarizer {
         conversation_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<MessageRecord>> {
-        let pool = self.pool.clone();
-        let conversation_id = conversation_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            list_messages(&conn, &conversation_id, limit)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        list_messages(&conn, conversation_id, limit)
     }
 
     /// Fetch a single conversation by id.
     pub fn get_conversation(&self, conversation_id: &str) -> Result<Option<ConversationRecord>> {
-        let pool = self.pool.clone();
-        let conversation_id = conversation_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            fetch_conversation(&conn, &conversation_id)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        fetch_conversation(&conn, conversation_id)
     }
 
     /// Override the provider/model used for a conversation.
@@ -210,70 +184,54 @@ impl Summarizer {
         provider_override: Option<String>,
         model_override: Option<String>,
     ) -> Result<ConversationRecord> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let conversation_id = conversation_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            let selection = models.resolve_runtime(provider_override, model_override, true)?;
-            let now = OffsetDateTime::now_utc().unix_timestamp();
-            conn.execute(
-                "UPDATE conversations SET provider_id = ?2, model_id = ?3, updated_at = ?4 WHERE id = ?1",
-                params![conversation_id, selection.provider.id, selection.model, now],
-            )?;
-            log_event(
-                &conn,
-                "info",
-                Some("AI-SET-MODEL"),
-                "ai.context",
-                "Conversation model updated",
-                Some("Provider/model override applied"),
-                Some(json!({
-                    "conversation_id": conversation_id,
-                    "provider": selection.provider.id,
-                    "model": selection.model,
-                })),
-            )
-            .ok();
-            fetch_conversation(&conn, &conversation_id)?
-                .ok_or_else(|| anyhow!("conversation not found"))
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let selection = self
+            .models
+            .resolve_runtime(provider_override, model_override, true)?;
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        conn.execute(
+            "UPDATE conversations SET provider_id = ?2, model_id = ?3, updated_at = ?4 WHERE id = ?1",
+            params![conversation_id, selection.provider.id, selection.model, now],
+        )?;
+        log_event(
+            &conn,
+            "info",
+            Some("AI-SET-MODEL"),
+            "ai.context",
+            "Conversation model updated",
+            Some("Provider/model override applied"),
+            Some(json!({
+                "conversation_id": conversation_id,
+                "provider": selection.provider.id,
+                "model": selection.model,
+            })),
+        )
+        .ok();
+        fetch_conversation(&conn, conversation_id)?.ok_or_else(|| anyhow!("conversation not found"))
     }
 
     /// Retrieve a previously cached summary by id.
     pub fn fetch_summary(&self, summary_id: &str) -> Result<Option<SummaryRecord>> {
-        let pool = self.pool.clone();
-        let summary_id = summary_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            load_summary(&conn, &summary_id)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        load_summary(&conn, summary_id)
     }
 
     /// Generate or return a cached conversation summary without rolling over.
     pub fn summarise_conversation(&self, conversation_id: &str) -> Result<SummaryRecord> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let conversation_id = conversation_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            let conversation = fetch_conversation(&conn, &conversation_id)?
-                .ok_or_else(|| anyhow!("conversation not found"))?;
-            let messages = list_messages(&conn, &conversation_id, None)?;
-            let mut excerpts = select_conversation_excerpts(&messages, None);
-            let config = read_config(&conn)?;
-            store_or_create_summary(
-                &conn,
-                &models,
-                "conversation",
-                &conversation_id,
-                &mut excerpts,
-                &config,
-            )
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        let conversation = fetch_conversation(&conn, conversation_id)?
+            .ok_or_else(|| anyhow!("conversation not found"))?;
+        let messages = list_messages(&conn, conversation_id, None)?;
+        let mut excerpts = select_conversation_excerpts(&messages, None);
+        let config = read_config(&conn)?;
+        store_or_create_summary(
+            &conn,
+            self.models.as_ref(),
+            "conversation",
+            conversation_id,
+            &mut excerpts,
+            &config,
+        )
     }
 
     /// Append a new message and evaluate rollover thresholds.
@@ -283,92 +241,79 @@ impl Summarizer {
         role: &str,
         body: &str,
     ) -> Result<AppendResult> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let conversation_id = conversation_id.to_string();
-        let role = role.to_string();
-        let body = body.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            let config = read_config(&conn)?;
-            let mut tx = conn.transaction()?;
-            let conversation = fetch_conversation(&tx, &conversation_id)?
-                .ok_or_else(|| anyhow!("conversation not found"))?;
-            if conversation.ctx_force {
-                return Err(anyhow!("conversation already rolled"));
-            }
-            let message = insert_message(&tx, &conversation_id, &role, &body)?;
-            let total_tokens = sum_tokens(&tx, &conversation_id)?;
-            let context_limit =
-                context_limit_from_tags(&tx, &conversation.provider_id, &conversation.model_id)?;
-            let warn_threshold = (context_limit as f32 * config.warn_ratio) as i64;
-            let force_threshold = (context_limit as f32 * config.force_ratio) as i64;
-            let mut warn = conversation.ctx_warn;
-            if total_tokens >= warn_threshold && !conversation.ctx_warn {
-                mark_ctx_warn(&tx, &conversation_id)?;
-                warn = true;
-                log_event(
-                    &tx,
-                    "warn",
-                    Some("AI-CTX-WARN"),
-                    "ai.context",
-                    "Conversation approaching context limit",
-                    Some("A warning banner should be shown in the UI."),
-                    Some(json!({
-                        "conversation_id": conversation_id,
-                        "total_tokens": total_tokens,
-                        "threshold": warn_threshold,
-                    })),
-                )
-                .ok();
-            }
-            if total_tokens >= force_threshold {
-                let outcome = perform_rollover(
-                    &mut tx,
-                    &conversation,
-                    &models,
-                    &config,
-                    Some((&role, &body)),
-                )?;
-                tx.commit()?;
-                return Ok(AppendResult {
-                    message,
-                    warn: true,
-                    rolled: true,
-                    new_conversation: outcome.new_conversation,
-                    summary: outcome.summary,
-                    total_tokens,
-                });
-            }
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        let config = read_config(&conn)?;
+        let mut tx = conn.transaction()?;
+        let conversation = fetch_conversation(&tx, conversation_id)?
+            .ok_or_else(|| anyhow!("conversation not found"))?;
+        if conversation.ctx_force {
+            return Err(anyhow!("conversation already rolled"));
+        }
+        let message = insert_message(&tx, conversation_id, role, body)?;
+        let total_tokens = sum_tokens(&tx, conversation_id)?;
+        let context_limit =
+            context_limit_from_tags(&tx, &conversation.provider_id, &conversation.model_id)?;
+        let warn_threshold = (context_limit as f32 * config.warn_ratio) as i64;
+        let force_threshold = (context_limit as f32 * config.force_ratio) as i64;
+        let mut warn = conversation.ctx_warn;
+        if total_tokens >= warn_threshold && !conversation.ctx_warn {
+            mark_ctx_warn(&tx, conversation_id)?;
+            warn = true;
+            log_event(
+                &tx,
+                "warn",
+                Some("AI-CTX-WARN"),
+                "ai.context",
+                "Conversation approaching context limit",
+                Some("A warning banner should be shown in the UI."),
+                Some(json!({
+                    "conversation_id": conversation_id,
+                    "total_tokens": total_tokens,
+                    "threshold": warn_threshold,
+                })),
+            )
+            .ok();
+        }
+        if total_tokens >= force_threshold {
+            let outcome = perform_rollover(
+                &mut tx,
+                &conversation,
+                self.models.as_ref(),
+                &config,
+                Some((role, body)),
+            )?;
             tx.commit()?;
-            Ok(AppendResult {
+            return Ok(AppendResult {
                 message,
-                warn,
-                rolled: false,
-                new_conversation: None,
-                summary: None,
+                warn: true,
+                rolled: true,
+                new_conversation: outcome.new_conversation,
+                summary: outcome.summary,
                 total_tokens,
-            })
+            });
+        }
+        tx.commit()?;
+        Ok(AppendResult {
+            message,
+            warn,
+            rolled: false,
+            new_conversation: None,
+            summary: None,
+            total_tokens,
         })
-        .map_err(|err| anyhow!(err.to_string()))?
     }
 
     /// Force a rollover for the supplied conversation.
     pub fn rollover(&self, conversation_id: &str) -> Result<RolloverOutcome> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let conversation_id = conversation_id.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            let config = read_config(&conn)?;
-            let mut tx = conn.transaction()?;
-            let conversation = fetch_conversation(&tx, &conversation_id)?
-                .ok_or_else(|| anyhow!("conversation not found"))?;
-            let outcome = perform_rollover(&mut tx, &conversation, &models, &config, None)?;
-            tx.commit()?;
-            Ok(outcome)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        let config = read_config(&conn)?;
+        let mut tx = conn.transaction()?;
+        let conversation = fetch_conversation(&tx, conversation_id)?
+            .ok_or_else(|| anyhow!("conversation not found"))?;
+        let outcome =
+            perform_rollover(&mut tx, &conversation, self.models.as_ref(), &config, None)?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Summarise arbitrary source material.
@@ -378,16 +323,15 @@ impl Summarizer {
         target_id: &str,
         content: &str,
     ) -> Result<SummaryRecord> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let target_type = target_type.to_string();
-        let target_id = target_id.to_string();
-        let content = content.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            summarise_text(&conn, &models, &target_type, &target_id, &content, None)
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        summarise_text(
+            &conn,
+            self.models.as_ref(),
+            target_type,
+            target_id,
+            content,
+            None,
+        )
     }
 
     /// Summarise a daily digest payload with caching.
@@ -397,15 +341,15 @@ impl Summarizer {
         facts: serde_json::Value,
         fallback: &str,
     ) -> Result<SummaryRecord> {
-        let pool = self.pool.clone();
-        let models = Arc::clone(&self.models);
-        let date_key = date_key.to_string();
-        let fallback = fallback.to_string();
-        spawn_blocking(move || {
-            let conn = pool.get()?;
-            summarise_text(&conn, &models, "day", &date_key, &fallback, Some(facts))
-        })
-        .map_err(|err| anyhow!(err.to_string()))?
+        let conn = self.pool.get().map_err(|err| anyhow!(err.to_string()))?;
+        summarise_text(
+            &conn,
+            self.models.as_ref(),
+            "day",
+            date_key,
+            fallback,
+            Some(facts),
+        )
     }
 }
 
@@ -817,7 +761,7 @@ fn store_or_create_summary(
         },
         AiChatMessage {
             role: "user".into(),
-            content: prompt,
+            content: prompt.clone(),
         },
     ];
     let input = AiChatInput {
